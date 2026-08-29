@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"encoding/json"
 	"image/png"
 	"math"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -258,7 +260,90 @@ func execFusermount(mountpoint string) error {
 }
 
 func openGUI(target string) {
+	// URLs: lança o navegador padrão diretamente com a URL no argv —
+	// o xdg-open/gio pode perder a URL quando o Chrome mostra o seletor
+	// de perfis/contas na inicialização.
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		if exe := defaultBrowserExec(); exe != "" {
+			args := append(chromeProfileArgs(exe), target)
+			if err := exec.Command(exe, args...).Start(); err == nil {
+				return
+			}
+		}
+	}
 	_ = exec.Command("xdg-open", target).Start()
+}
+
+// chromeProfileArgs evita o seletor de perfis/contas: navegadores Chromium
+// abrem o picker quando lançados sem --profile-directory; usamos o último
+// perfil usado pelo usuário.
+func chromeProfileArgs(exe string) []string {
+	low := strings.ToLower(filepath.Base(exe))
+	var state string
+	switch {
+	case strings.Contains(low, "chromium"):
+		state = filepath.Join(homeDirTray(), ".config", "chromium", "Local State")
+	case strings.Contains(low, "brave"):
+		state = filepath.Join(homeDirTray(), ".config", "BraveSoftware", "Brave-Browser", "Local State")
+	case strings.Contains(low, "edge"):
+		state = filepath.Join(homeDirTray(), ".config", "microsoft-edge", "Local State")
+	default:
+		state = filepath.Join(homeDirTray(), ".config", "google-chrome", "Local State")
+	}
+	b, err := os.ReadFile(state)
+	if err != nil {
+		return nil
+	}
+	var st struct {
+		Profile struct {
+			LastUsed string `json:"last_used"`
+		} `json:"profile"`
+	}
+	if json.Unmarshal(b, &st) != nil || st.Profile.LastUsed == "" {
+		return nil
+	}
+	return []string{"--profile-directory=" + st.Profile.LastUsed}
+}
+
+func homeDirTray() string {
+	h, _ := os.UserHomeDir()
+	return h
+}
+
+// defaultBrowserExec resolve o executável do navegador padrão
+// (lê o .desktop do xdg-settings e extrai o binário do Exec=).
+func defaultBrowserExec() string {
+	out, err := exec.Command("xdg-settings", "get", "default-web-browser").Output()
+	if err != nil {
+		return ""
+	}
+	desktop := strings.TrimSpace(string(out))
+	home, _ := os.UserHomeDir()
+	for _, dir := range []string{
+		filepath.Join(home, ".local/share/applications"),
+		"/usr/share/applications",
+		"/var/lib/flatpak/exports/share/applications",
+	} {
+		b, err := os.ReadFile(filepath.Join(dir, desktop))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(line, "Exec=") {
+				exe := strings.TrimSpace(strings.TrimPrefix(line, "Exec="))
+				if i := strings.Index(exe, " "); i > 0 {
+					exe = exe[:i]
+				}
+				if filepath.IsAbs(exe) {
+					return exe
+				}
+				if p, _ := exec.LookPath(exe); p != "" {
+					return p
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // iconPNG gera o ícone 64x64 (cubo CROM em quadrado arredondado) sem
