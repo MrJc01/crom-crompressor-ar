@@ -312,13 +312,16 @@ func chromeProfileArgs(exe string) []string {
 	return []string{"--profile-directory=" + st.Profile.LastUsed}
 }
 
-// exeRunning verifica se um executável específico tem processo ativo
-// (lendo /proc/*/exe — precisa do resolved path).
+// exeRunning verifica se um executável específico tem processo ativo.
+// O Chrome é um wrapper (/opt/google/chrome/google-chrome) que exec
+// o binário real (/opt/google/chrome/chrome) — então considera também
+// processos do MESMO diretório.
 func exeRunning(exePath string) bool {
 	resolved, err := filepath.EvalSymlinks(exePath)
 	if err != nil {
 		resolved = exePath
 	}
+	dir := filepath.Dir(resolved)
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return false
@@ -334,7 +337,7 @@ func exeRunning(exePath string) bool {
 		if err != nil {
 			continue
 		}
-		if link == resolved {
+		if link == resolved || filepath.Dir(link) == dir {
 			return true
 		}
 	}
