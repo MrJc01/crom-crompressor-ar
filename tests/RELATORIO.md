@@ -95,3 +95,25 @@ Após a campanha acima, revisão cruzada encontrou e corrigiu:
    documentada; caminho alternativo `tar | tar` funciona.
 
 7. Artefato `internal/vault/.tmp` (resíduo de teste) removido.
+
+## Execução do backlog (29/08, noite)
+
+| Item | Status |
+|---|---|
+| P0 commit do trabalho | ✔ 4 commits lógicos |
+| **P0 T14a** (residente × CLI) | ✔ **corrigido** — `Save` com merge por UID (dirty/deleted); 4 unitários sob `-race`; T14a virou verificação dura na suíte |
+| P1 backup do manifest | ✔ `Save` rotaciona `manifest.json.bak` |
+| P1 `crom-ar doctor` | ✔ audita config/manifest/UIDs/órfãos/brains/spool; `--fix` restaura do `.bak`; `--prune` apaga órfãos |
+| P1 CI com `-race` | ✔ `go test -race ./...` no workflow |
+| P1 README | ✔ painel Codebooks, apps do cofre, doctor/token, novos achados |
+| P2 `token rotate` | ✔ |
+| P2 rsync | ✔ **RESOLVIDO** — causa real: `fchmod` do rsync em arquivo pendente; `Chmod` agora atende pendentes via opts (T17a/b: rsync sem erros + sha ok) |
+| P2 janitor de spool testado | ✔ S15 (poda 24h na remontagem + recriação on-demand) |
+| P2 bench A/B automatizado | ✔ S16 (recomendação + ratio cdc < 100%) |
+
+Pendências restantes (não bloqueantes): criptografia por padrão, progresso
+por arquivo na GUI, log estruturado do residente, kill -9 durante operação
+de API (difícil de automatizar de forma estável).
+
+**Estado final das suítes: 90/90 (suite.sh) · 17/17 (fuse_integration.sh) ·
+`go test -race ./...` verde · CI com race detector.**
