@@ -264,7 +264,13 @@ func openGUI(target string) {
 	// o xdg-open/gio pode perder a URL quando o Chrome mostra o seletor
 	// de perfis/contas na inicialização.
 	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		if chromeFamilyRunning() {
+			// navegador já aberto: xdg-open entrega como ABA na janela ativa
+			_ = exec.Command("xdg-open", target).Start()
+			return
+		}
 		if exe := defaultBrowserExec(); exe != "" {
+			// fechado: lança direto no último perfil (sem seletor de contas)
 			args := append(chromeProfileArgs(exe), target)
 			if err := exec.Command(exe, args...).Start(); err == nil {
 				return
@@ -303,6 +309,29 @@ func chromeProfileArgs(exe string) []string {
 		return nil
 	}
 	return []string{"--profile-directory=" + st.Profile.LastUsed}
+}
+
+// chromeFamilyRunning detecta navegador Chromium-family já em execução.
+func chromeFamilyRunning() bool {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + e.Name() + "/comm")
+		if err != nil {
+			continue
+		}
+		c := strings.ToLower(strings.TrimSpace(string(b)))
+		if strings.Contains(c, "chrome") || strings.Contains(c, "chromium") ||
+			strings.Contains(c, "brave") || strings.Contains(c, "edge") {
+			return true
+		}
+	}
+	return false
 }
 
 func homeDirTray() string {
