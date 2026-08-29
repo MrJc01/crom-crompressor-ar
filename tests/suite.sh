@@ -244,8 +244,9 @@ echo "conteúdo único para brain $RANDOM" > /tmp/suite-brain-doc.txt
 ./bin/crom-ar add /tmp/suite-brain-doc.txt --brain "$CROM_AR_ROOT/brains/dominio.cromdb" >/dev/null 2>&1 && ok "T10a add com brain específico" || bad "T10a add --brain"
 ./bin/crom-ar brain use vault >/dev/null 2>&1
 ./bin/crom-ar brain remove dominio 2>/dev/null && bad "T10b remove com refs deveria recusar" || ok "T10b remove com refs recusado"
-./bin/crom-ar rm suite-brain-doc.txt >/dev/null 2>&1
-./bin/crom-ar brain remove dominio >/dev/null 2>&1 && ok "T10c remove sem refs permitido" || bad "T10c remove sem refs"
+./bin/crom-ar rm suite-brain-doc.txt >"$R/t10c-rm.log" 2>&1
+./bin/crom-ar rm app755.bin app644.txt excl.txt >"$R/t10c-rm.log" 2>&1 && ok "T10c rm liberta as usagens de dominio" || bad "T10c rm: $(tail -1 "$R/t10c-rm.log")"
+./bin/crom-ar brain remove dominio >"$R/t10c-remove.log" 2>&1 && ok "T10d remove sem refs permitido" || bad "T10d remove sem refs: $(tail -1 "$R/t10c-remove.log")"
 
 # ════════ S11 — Tray: FUSE e painel web compartilham o MESMO estado ════════
 # Regressão do bug de 28/08: o tray montava o FUSE com uma segunda Store —
@@ -274,25 +275,54 @@ echo "— S13 Esqueleto read-only —"
 touch "$CDMNT/escrita" 2>/dev/null && bad "T13b esqueleto deveria ser read-only" || ok "T13b esqueleto read-only"
 fusermount3 -u "$CDMNT" 2>/dev/null
 
-# ════════ S14 — Concorrência: CLI mutando com residente ativo ════════
-# Limitação conhecida: o residente mantém o manifest em memória e o CLI
-# grava no disco — um Save do residente pode sobrescrever entradas do CLI.
+# ════════ S14 — Concorrência: CLI mutando com residente ativo (T14a) ════════
+# O residente faz merge por UID no Save: mutações de CLI não são perdidas.
 echo "— S14 Concorrência CLI × residente —"
 echo "entrada do CLI $RANDOM" > /tmp/suite-cli.txt
 CROM_AR_ROOT=$CROM_AR_ROOT CROMPRESSOR_BIN=$CROMPRESSOR_BIN $BIN add /tmp/suite-cli.txt >/dev/null 2>&1
 # dispara um Save do residente (criação de pasta via API persiste o manifest)
 curl -s -X POST -H "Content-Type: application/json" -d '{"path":"/lixeira-suite"}' -H "X-Crom-Token: $TTOK" "$TT/api/folder/create" >/dev/null 2>&1; true
 sleep 1
-if python3 -c "
+python3 -c "
 import json,sys
 m=json.load(open('$CROM_AR_ROOT/manifest.json'))
-sys.exit(0 if any('suite-cli' in e['name'] for e in m['entries']) else 1)"; then
-  ok "T14a Save do residente preservou entrada do CLI"
-else
-  echo "  ⚠ T14a KNOWN LIMITATION: Save do residente sobrescreve entradas adicionadas por CLI concorrente"
-fi
+sys.exit(0 if any('suite-cli' in e['name'] for e in m['entries']) else 1)" && ok "T14a Save do residente preservou entrada do CLI (merge)" || bad "T14a residente apagou entrada do CLI"
 CROM_AR_ROOT=$CROM_AR_ROOT CROMPRESSOR_BIN=$CROMPRESSOR_BIN $BIN rm suite-cli.txt >/dev/null 2>&1; true
 kill "$TRAYPID" 2>/dev/null; sleep 1
+
+# S15 - Spool: janitor 24h e recriacao on-demand
+echo "— S15 Spool —"
+n0=$(ls "$CROM_AR_ROOT/spool" 2>/dev/null | grep -vc tmp || true)
+find "$CROM_AR_ROOT/spool" -maxdepth 1 -type f ! -name 'tmp-*' -exec touch -d '25 hours ago' {} + 2>/dev/null
+fusermount3 -u "$MNT" 2>/dev/null; umount -l "$MNT" 2>/dev/null
+setsid env CROM_AR_ROOT=$CROM_AR_ROOT CROMPRESSOR_BIN=$CROMPRESSOR_BIN $BIN fuse -m "$MNT" </dev/null >"$R/fuse2.log" 2>&1 &
+FUSEPID=$!
+sleep 2
+n1=$(ls "$CROM_AR_ROOT/spool" 2>/dev/null | grep -vc tmp || true)
+[ "$n1" -lt "$n0" ] && ok "T15a spool frio podado na remontagem ($n0->$n1)" || bad "T15a spool nao podado ($n0->$n1)"
+h=$(sha256sum "$MNT/doc-solto.txt" 2>/dev/null | cut -d' ' -f1)
+n2=$(ls "$CROM_AR_ROOT/spool" 2>/dev/null | grep -vc tmp || true)
+[ -n "$h" ] && [ "$n2" -ge 1 ] && ok "T15b leitura recria spool on-demand" || bad "T15b spool on-demand"
+mount | grep -q "$MNT " && ok "T15c remontagem saudavel" || bad "T15c remontagem"
+
+# S16 - Bench de estrategias (A/B com codebook)
+echo "— S16 Bench —"
+./bin/crom-ar bench /tmp/suite-doc.txt 2>/dev/null | grep -q "Melhor forma lossless" && ok "T16a bench recomenda estrategia" || bad "T16a bench"
+r=$(./bin/crom-ar bench /tmp/suite-doc.txt 2>/dev/null | awk '/^cdc /{for(i=1;i<=NF;i++) if ($i ~ /%$/) {gsub("%","",$i); print $i; exit}}' | head -1)
+python3 -c "import sys; sys.exit(0 if float('$r' or 0) < 100 else 1)" && ok "T16b cdc comprime texto (<100%: ${r}%)" || bad "T16b ratio cdc (${r:-vazio}%)"
+
+# S17 - rsync nativo (mkstemp O_EXCL + fchmod em pendente + rename)
+# Regressao do Chmod: o rsync da fchmod no temp ANTES do import terminar.
+echo "— S17 rsync —"
+mkdir -p /tmp/suite-rsync-src/sub
+echo "arquivo rsync $RANDOM" > /tmp/suite-rsync-src/a.txt
+echo "sub $RANDOM" > /tmp/suite-rsync-src/sub/b.txt
+rsync -a /tmp/suite-rsync-src/ "$MNT/rsync-dst/" 2>"$R/rsync.err"
+wait_settle
+[ ! -s "$R/rsync.err" ] && ok "T17a rsync sem erros" || bad "T17a rsync erros: $(head -1 "$R/rsync.err")"
+hsrc=$(sha256sum /tmp/suite-rsync-src/a.txt | cut -d' ' -f1)
+hdst=$(sha256sum "$MNT/rsync-dst/a.txt" 2>/dev/null | cut -d' ' -f1)
+check "T17b sha pos-rsync" "$hsrc" "$hdst"
 
 echo "════════════════════════════════"
 echo "TOTAL: PASS=$PASS FAIL=$FAIL"

@@ -80,6 +80,7 @@ func (s *Store) RenameEntry(oldPath, newPath string) error {
 		e.RelPath = path.Base(newPath)
 		e.IsDir = false
 	}
+	s.markDirty(e.UID)
 	return s.Save()
 }
 
@@ -197,6 +198,7 @@ func (s *Store) RenameFolder(old, newName string) error {
 		} else if strings.HasPrefix(e.Path, old+"/") {
 			e.Path = dst + strings.TrimPrefix(e.Path, old)
 		}
+		s.markDirty(e.UID)
 	}
 	return s.Save()
 }
@@ -219,10 +221,11 @@ func (s *Store) DeleteFolder(p string) error {
 		}
 	}
 	parent := path.Dir(p)
-	for _, e := range s.Man.Entries {
+	for _, e := range s.EntriesSnapshot() {
 		if e.Folder == p {
 			e.Folder = parent
 			e.Path = path.Join(parent, path.Base(e.Path))
+			s.markDirty(e.UID)
 		}
 	}
 	var keep []string
@@ -257,6 +260,7 @@ func (s *Store) MoveEntry(uid, folder string) error {
 	} else {
 		e.Path = folder + suffix
 	}
+	s.markDirty(e.UID)
 	return s.Save()
 }
 
@@ -309,6 +313,7 @@ func (s *Store) RenameGroup(old, new string) error {
 		if e.Folder == oldPrefix || strings.HasPrefix(e.Folder, oldPrefix+"/") {
 			e.Folder = newPrefix + strings.TrimPrefix(e.Folder, oldPrefix)
 		}
+		s.markDirty(e.UID)
 	}
 	return s.Save()
 }

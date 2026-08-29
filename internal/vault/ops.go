@@ -268,7 +268,7 @@ func (s *Store) newEntry(hash, src, group, rel string, isDir bool, size int64, c
 	}
 	return &Entry{
 		UID: randomUID(),
-		ID: hash, Name: filepath.Base(rel), Group: group, RelPath: rel, Folder: folder,
+		ID:  hash, Name: filepath.Base(rel), Group: group, RelPath: rel, Folder: folder,
 		Path: canonicalPath(folder, rel), IsDir: isDir,
 		SourcePath: src, Size: size, CromFile: cromName, CromSize: cromSize,
 		Codebook: brain, HitRate: 0, Mode: mode, PackFlags: opt.PackFlagsList(), PackedAt: s.timeNow(),
@@ -485,11 +485,21 @@ func (s *Store) Remove(entries []*Entry) (int, error) {
 	return s.removeLocked(entries)
 }
 
+// removeLocked roda com s.mu tomado; anota as remoções para o merge do Save
+// (um merge posterior não pode ressuscitar o que removemos).
 func (s *Store) removeLocked(entries []*Entry) (int, error) {
 	removed := map[string]bool{}
 	for _, e := range entries {
 		removed[e.UID] = true
 	}
+	s.dataMu.Lock()
+	if s.deleted == nil {
+		s.deleted = map[string]bool{}
+	}
+	for uid := range removed {
+		s.deleted[uid] = true // não ressuscitar no merge (T14a)
+	}
+	s.dataMu.Unlock()
 	var keep []*Entry
 	for _, e := range s.Man.Entries {
 		if removed[e.UID] {

@@ -54,9 +54,16 @@ Motor de compressão: [MrJc01/crompressor](https://github.com/MrJc01/crompressor
 2. **Tray** (`crom-ar tray`): ícone residente perto do relógio — estado do
    cofre, montar/desmontar, painel web ligável, treinar codebook.
    Single-instance. `install --autostart` sobe no login (systemd --user).
+   `--web-addr` permite trocar a porta (instâncias de teste).
 3. **Painel web** (`crom-ar gui`): GUI no navegador (127.0.0.1:8619) com
    árvore de pastas, import por upload, extração com verificação, busca
    O(1), relatórios. **Token de 256 bits** (`0600`) + verificação Host/Origin.
+   Na barra lateral, o painel **🧠 Codebooks** mostra, por codebook, quantos
+   bytes ele **poupou ou custou** (ratio, hit médio, custo do `.cromdb`)
+   — os números somam exatamente aos totais do cofre.
+4. **Apps direto do cofre**: o exec bit é persistido (pack no FUSE, chmod,
+   extração) — binários importados rodam de dentro de `~/CromAr/apps/`
+   com decompressão on-demand, sem extrair.
 
 ### Pacote portátil `.cromar`
 ```bash
@@ -105,7 +112,9 @@ crom-ar extract <nome> -o dir   # recompila no HD com verificação
 crom-ar verify <nome>           # reconfere SHA-256
 crom-ar info <nome>             # entropia, chunks, HitRate
 crom-ar bench <arquivo|pasta>   # testa 6 estratégias e recomenda a melhor
-crom-ar brain list|add|use|export|train   # codebooks compartilháveis
+crom-ar brain list|add|use|remove|export|train   # codebooks compartilháveis
+crom-ar doctor [--fix] [--prune] # saúde do cofre (manifest, órfãos, brains)
+crom-ar token rotate            # regenera o token da GUI (0600)
 ```
 
 ## Achados de engenharia (por que cada decisão existe)
@@ -120,6 +129,10 @@ crom-ar brain list|add|use|export|train   # codebooks compartilháveis
 | RELEASE é o único ponto "não vêm mais dados" | verificação lossless e dedup rodam lá, com sidecar `.meta` para crash recovery (kill -9 não perde o que já fechou) |
 | Subprocesso de pack custa ~1s | semáforo global (3) para imports em massa; bulk 200 arquivos ≈ 3-5s |
 | Dados aleatórios/já comprimidos ficam ~100% (+112 B de header) | bypass nativo; HitRate/telemetria expostos para decidir o que vale esqueleto |
+| Tray servia painel e FUSE com **duas Stores** (painel cego ao FUSE; risco de perda) | `MountServerStore`: uma memória por processo + snapshots (`dataMu`) para leitores |
+| Residente e CLI escreviam o manifest last-writer-wins (**perda de dados**) | `Save` detecta mudança externa e faz **merge por UID** (dirty/deleted locais vencem) |
+| `Access()` respondia OK sempre — `[ -x ]` verdadeiro até em 0644 | Access respeita bits persistidos; apps executam direto do cofre |
+| rsync precisa de `mkstemp` O_EXCL + `fchmod` **em arquivo ainda não importado** | `Create` preserva modo pedido; `Chmod` atende pendentes via opts do pending |
 
 ## Estrutura do repositório
 
@@ -142,6 +155,22 @@ bin/                    motor crompressor puxado do HD (não versionado)
   (o formato v5+ já tem Merkle) · multi-volume — estão no radar.
 - `grep` O(1) requer chunks semânticos; em arquivos 100% literais não há busca.
 - Testado em Cinnamon/Nemo (Linux, fuse3). O motor alvo é o V24 local.
+- `brain remove` recusa codebook com entradas que o referenciam (intencional:
+  sem o codebook o unpack quebra).
+- Cada `Save` rotaciona uma cópia do manifest (`manifest.json.bak`) e o
+  `crom-ar doctor` audita/resaude o cofre.
+
+## Testes
+
+```bash
+make test          # unitários Go
+make test-race     # unitários sob -race (corridas painel × FUSE)
+tests/suite.sh     # suíte-mestra: 90+ verificações (FUSE, pacotes, web, codebooks,
+                   #   modo/exec, spool, bench, rsync, concorrência CLI × residente)
+tests/fuse_integration.sh   # suíte de integração FUSE (17 verificações)
+```
+
+O relatório completo da última campanha está em `tests/RELATORIO.md`.
 
 ## Licença
 

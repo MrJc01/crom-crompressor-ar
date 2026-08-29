@@ -3,6 +3,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -57,6 +59,8 @@ Comandos:
   edge pack|unpack              Esqueleto lossy (sem deltas) via cromlib
   bench <arquivo|pasta>         Testa estratégias de compressão e recomenda a melhor
   mount <termo> -m <ponto>      Monta o .crom como filesystem (VFS, exige FUSE)
+  doctor [--fix] [--prune]      Saúde do cofre: manifest, órfãos, brains, spool
+  token rotate                  Regenera o token de acesso da GUI (0600)
 
 Variáveis:
   CROMPRESSOR_BIN   caminho do binário crompressor
@@ -108,6 +112,10 @@ func main() {
 		err = cmdTrain(os.Args[2:])
 	case "bench":
 		err = cmdBench(os.Args[2:])
+	case "doctor":
+		err = cmdDoctor(os.Args[2:])
+	case "token":
+		err = cmdToken(os.Args[2:])
 	case "mount":
 		err = cmdMount(os.Args[2:])
 	case "help", "-h", "--help":
@@ -1320,4 +1328,190 @@ func ratio(orig, crom int64) float64 {
 		return 0
 	}
 	return float64(crom) / float64(orig) * 100
+}
+
+// cmdDoctor audita a saúde do cofre: manifest, referências quebradas,
+// .crom órfãos, codebooks e spool pendente. Com --fix, aplica correções
+// seguras (restaurar manifest do .bak); com --prune, apaga .crom órfãos.
+func cmdDoctor(args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	fix := fs.Bool("fix", false, "corrigir o que for seguro (restaurar manifest do .bak)")
+	prune := fs.Bool("prune", false, "apagar .crom órfãos (sem entrada no manifest)")
+	if _, err := parseFlex(fs, args); err != nil {
+		return err
+	}
+	root := rootDir()
+	problems := 0
+	fail := func(msg string) { problems++; fmt.Println("  ✘", msg) }
+	warn := func(msg string) { fmt.Println("  ⚠", msg) }
+	okf := func(msg string) { fmt.Println("  ✔", msg) }
+
+	fmt.Printf("🩺 crom-ar doctor — %s\n", root)
+
+	// 1) config.json
+	cfgPath := filepath.Join(root, "config.json")
+	var cfg vault.Config
+	if b, err := os.ReadFile(cfgPath); err != nil {
+		fail("config.json ilegível: " + err.Error())
+	} else if err := json.Unmarshal(b, &cfg); err != nil {
+		fail("config.json inválido: " + err.Error())
+	} else {
+		okf("config.json válido (cofre: " + cfg.Root + ")")
+	}
+
+	// 2) manifest.json (com resgate do .bak)
+	manPath := filepath.Join(root, "manifest.json")
+	var man vault.Manifest
+	if b, err := os.ReadFile(manPath); err != nil {
+		fail("manifest.json ilegível: " + err.Error())
+	} else if err := json.Unmarshal(b, &man); err != nil {
+		bak := manPath + ".bak"
+		if bb, berr := os.ReadFile(bak); berr == nil {
+			if *fix {
+				if werr := os.WriteFile(manPath, bb, 0o644); werr == nil {
+					if json.Unmarshal(bb, &man) == nil {
+						okf("manifest.json corrompido — restaurado do .bak")
+					} else {
+						fail("manifest e .bak corrompidos — cofre precisa de reconstrução manual")
+					}
+				} else {
+					fail("falha ao restaurar do .bak: " + werr.Error())
+				}
+			} else {
+				warn("manifest.json corrompido mas .bak saudável — rode: crom-ar doctor --fix")
+				_ = bb
+			}
+		} else {
+			fail("manifest.json corrompido e sem .bak — reconstrução manual necessária")
+		}
+	} else {
+		okf(fmt.Sprintf("manifest válido (%d entradas, %d pastas)", len(man.Entries), len(man.Folders)))
+	}
+
+	// 3) UIDs duplicados (quebrariam o merge por UID)
+	uid := map[string]int{}
+	for _, e := range man.Entries {
+		uid[e.UID]++
+	}
+	dup := 0
+	for u, n := range uid {
+		if n > 1 {
+			dup++
+			warn(fmt.Sprintf("UID duplicado (%d×): %s", n, u))
+		}
+	}
+	if dup == 0 && len(man.Entries) > 0 {
+		okf("UIDs únicos")
+	}
+
+	// 4) entradas → .crom existente
+	missing := 0
+	for _, e := range man.Entries {
+		if _, err := os.Stat(filepath.Join(cfg.VaultDir, e.CromFile)); err != nil {
+			missing++
+			warn("entrada sem .crom: " + e.Name + " (" + e.CromFile + ")")
+		}
+	}
+	if missing == 0 {
+		okf("todas as entradas apontam para .crom existentes")
+	}
+
+	// 5) .crom órfãos no disco
+	refs := map[string]bool{}
+	for _, e := range man.Entries {
+		refs[e.CromFile] = true
+	}
+	orphans, _ := filepath.Glob(filepath.Join(cfg.VaultDir, "*.crom"))
+	var orphList []string
+	for _, f := range orphans {
+		if !refs[filepath.Base(f)] {
+			orphList = append(orphList, f)
+		}
+	}
+	if len(orphList) == 0 {
+		okf("nenhum .crom órfão no vault/")
+	} else {
+		for _, f := range orphList {
+			warn(".crom órfão: " + filepath.Base(f))
+		}
+		if *prune {
+			for _, f := range orphList {
+				_ = os.Remove(f)
+			}
+			okf(fmt.Sprintf("%d .crom órfão(ãos) apagados (--prune)", len(orphList)))
+		} else {
+			warn(fmt.Sprintf("%d órfão(ãos) — rode: crom-ar doctor --prune", len(orphList)))
+		}
+	}
+
+	// 6) codebooks
+	if cfg.DefaultBrain != "" {
+		if _, err := os.Stat(filepath.Join(cfg.BrainsDir, cfg.DefaultBrain+".cromdb")); err != nil {
+			fail("codebook padrão ausente: " + cfg.DefaultBrain)
+		} else {
+			okf("codebook padrão presente: " + cfg.DefaultBrain)
+		}
+	}
+	mBrains := map[string]bool{}
+	files, _ := filepath.Glob(filepath.Join(cfg.BrainsDir, "*.cromdb"))
+	for _, f := range files {
+		mBrains[strings.TrimSuffix(filepath.Base(f), ".cromdb")] = true
+	}
+	for _, e := range man.Entries {
+		if e.Codebook == "" {
+			continue
+		}
+		name := vault.BrainNameFromPath(e.Codebook)
+		if name != "" && !mBrains[name] {
+			warn("entrada usa codebook ausente: " + name + " (" + e.Name + ")")
+		}
+	}
+
+	// 7) spool tmp pendente (import em voo de um processo morto)
+	tmps, _ := filepath.Glob(filepath.Join(root, "spool", "tmp-*"))
+	if len(tmps) > 0 {
+		warn(fmt.Sprintf("%d tmp pendente(s) no spool — a remontagem recupera via .meta", len(tmps)))
+	} else {
+		okf("spool sem pendências")
+	}
+
+	if problems == 0 {
+		fmt.Println("🩺 tudo saudável")
+		return nil
+	}
+	fmt.Printf("🩺 %d problema(s) sério(s) encontrado(s)\n", problems)
+	if problems > 0 && !*fix {
+		fmt.Println("   (use --fix para correções seguras)")
+	}
+	return nil
+}
+
+// cmdToken gerencia o token de acesso da GUI.
+func cmdToken(args []string) error {
+	if len(args) == 0 || args[0] != "rotate" {
+		return fmt.Errorf("uso: crom-ar token rotate")
+	}
+	if _, err := server.EnsureToken(); err != nil { // garante estrutura
+		return err
+	}
+	if _, err := regenerateToken(); err != nil {
+		return err
+	}
+	fmt.Println("✔ token regenerado (0600) — reabra o painel pelo atalho/ícone do tray")
+	fmt.Println("  novo token em:", server.DefaultTokenPath())
+	return nil
+}
+
+// regenerateToken substitui o token persistido por um novo (256 bits).
+func regenerateToken() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	tok := hex.EncodeToString(raw)
+	p := server.DefaultTokenPath()
+	if err := os.WriteFile(p, []byte(tok), 0o600); err != nil {
+		return "", err
+	}
+	return tok, nil
 }

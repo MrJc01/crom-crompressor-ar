@@ -552,9 +552,26 @@ func (v *VaultFS) Create(name string, flags uint32, mode uint32, ctx *fuse.Conte
 	return &nodefs.WithFlags{File: c, FuseFlags: fuse.FOPEN_KEEP_CACHE, Description: "crom-ar"}, fuse.OK
 }
 
-// Chmod atualiza o modo persistido da entrada (permite chmod +x na montagem).
+// Chmod atualiza o modo persistido da entrada (permite chmod +x na montagem
+// e atende o fchmod do rsync logo após o mkstemp — o arquivo pode ainda
+// estar pendente de import, caso em que o modo fica nos opts do pending).
 func (v *VaultFS) Chmod(name string, mode uint32, ctx *fuse.Context) fuse.Status {
 	name = cleanPath(name)
+	dir, e := v.lookup(name)
+	if dir {
+		return fuse.OK // pastas virtuais são sempre 0755
+	}
+	if e == nil {
+		if p := v.getPending(name); p != nil {
+			v.pendMu.Lock()
+			if p.opts != nil {
+				p.opts.Mode = mode & 0o777
+			}
+			v.pendMu.Unlock()
+			return fuse.OK
+		}
+		return fuse.ENOENT
+	}
 	if err := v.st.SetEntryMode(name, mode); err != nil {
 		return fuse.ENOENT
 	}

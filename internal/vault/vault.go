@@ -47,8 +47,8 @@ type Entry struct {
 	Size       int64     `json:"size"`
 	CromFile   string    `json:"crom_file"` // nome do arquivo dentro de VaultDir
 	CromSize   int64     `json:"crom_size"`
-	Codebook   string    `json:"codebook"` // "" = empacotado sem codebook
-	HitRate    float64   `json:"hit_rate"` // % de chunks que caíram no codebook
+	Codebook   string    `json:"codebook"`       // "" = empacotado sem codebook
+	HitRate    float64   `json:"hit_rate"`       // % de chunks que caíram no codebook
 	Mode       uint32    `json:"mode,omitempty"` // permissões (0 = 0644; exec bit preservado)
 	PackFlags  []string  `json:"pack_flags"`
 	PackedAt   time.Time `json:"packed_at"`
@@ -64,26 +64,58 @@ type Manifest struct {
 
 // Store agrega config + manifest e o acesso ao binário crompressor.
 type Store struct {
-	Cfg      *Config
-	Man      *Manifest
-	manPath  string
-	timeNow  func() time.Time
-	mu       sync.Mutex
-	sem      chan struct{}
-	dataMu   sync.RWMutex // protege as fatias Man.Entries/Man.Folders contra leitores concorrentes (painel web)
+	Cfg     *Config
+	Man     *Manifest
+	manPath string
+	timeNow func() time.Time
+	mu      sync.Mutex
+	sem     chan struct{}
+	dataMu  sync.RWMutex // protege as fatias Man.Entries/Man.Folders contra leitores concorrentes (painel web)
+
+	// Consistência residente × CLI: mutações locais não salvas são marcadas
+	// (dirty) e as remoções anotadas (deleted); no Save, se o manifest em
+	// disco mudou desde a última sincronização, um merge por UID adota o que
+	// outro processo escreveu — sem apagar mutações de ninguém (T14a).
+	saveMu         sync.Mutex
+	lastSync       time.Time
+	lastSize       int64
+	dirty          map[string]bool
+	deleted        map[string]bool
+	dirtyFolders   map[string]bool
+	deletedFolders map[string]bool
+	loadedDefault  string // DefaultBrain como estava no load (detecta mudança externa)
+	cfgDirty       bool   // nós mesmos mudamos a config desde o load
 }
 
 // appendEntry insere entrada com proteção de leitores (painel/FUSE na mesma
-// Store desde o fix da Store compartilhada).
+// Store desde o fix da Store compartilhada) e marca mutação local pendente.
 func (s *Store) appendEntry(e *Entry) {
 	s.dataMu.Lock()
+	if s.dirty == nil {
+		s.dirty = map[string]bool{}
+	}
+	s.dirty[e.UID] = true
 	s.Man.Entries = append(s.Man.Entries, e)
 	s.dataMu.Unlock()
 }
 
-// setEntries substitui a lista inteira (remoções, migração).
+// setEntries substitui a lista inteira (remoções, migração); os UIDs que
+// saíram ficam anotados como remoção local até o próximo Save sincronizar.
 func (s *Store) setEntries(keep []*Entry) {
 	s.dataMu.Lock()
+	if s.deleted == nil {
+		s.deleted = map[string]bool{}
+	}
+	cur := map[string]bool{}
+	for _, e := range s.Man.Entries {
+		cur[e.UID] = true
+	}
+	for _, e := range keep {
+		delete(cur, e.UID)
+	}
+	for uid := range cur {
+		s.deleted[uid] = true
+	}
 	s.Man.Entries = keep
 	s.dataMu.Unlock()
 }
@@ -91,13 +123,48 @@ func (s *Store) setEntries(keep []*Entry) {
 // appendFolder cria pasta virtual com proteção de leitores.
 func (s *Store) appendFolder(f string) {
 	s.dataMu.Lock()
+	if s.dirtyFolders == nil {
+		s.dirtyFolders = map[string]bool{}
+	}
+	s.dirtyFolders[f] = true
 	s.Man.Folders = append(s.Man.Folders, f)
 	s.dataMu.Unlock()
 }
 
-// setFolders substitui a lista de pastas (renames).
+// markDirtyUids marca entradas mutadas localmente (rename/move/replace).
+func (s *Store) markDirty(uids ...string) {
+	s.dataMu.Lock()
+	if s.dirty == nil {
+		s.dirty = map[string]bool{}
+	}
+	for _, u := range uids {
+		s.dirty[u] = true
+	}
+	s.dataMu.Unlock()
+}
+
+// setFolders substitui a lista de pastas (renames/remoções); as pastas que
+// saíram ficam anotadas para não ressuscitarem no merge.
 func (s *Store) setFolders(folders []string) {
 	s.dataMu.Lock()
+	if s.deletedFolders == nil {
+		s.deletedFolders = map[string]bool{}
+	}
+	if s.dirtyFolders == nil {
+		s.dirtyFolders = map[string]bool{}
+	}
+	cur := map[string]bool{}
+	for _, f := range s.Man.Folders {
+		cur[f] = true
+	}
+	for _, f := range folders {
+		delete(cur, f)
+		delete(s.dirtyFolders, f)
+	}
+	for f := range cur {
+		s.deletedFolders[f] = true
+		delete(s.dirtyFolders, f)
+	}
 	s.Man.Folders = folders
 	s.dataMu.Unlock()
 }
@@ -195,6 +262,15 @@ func LoadStore(root string) (*Store, error) {
 	} else {
 		s.Man = &Manifest{Version: manifestVersion}
 	}
+	s.dirty = map[string]bool{}
+	s.deleted = map[string]bool{}
+	s.dirtyFolders = map[string]bool{}
+	s.deletedFolders = map[string]bool{}
+	if st, err := os.Stat(s.manPath); err == nil {
+		s.lastSync = st.ModTime()
+		s.lastSize = st.Size()
+	}
+	s.loadedDefault = cfg.DefaultBrain
 	s.migrate()
 	return s, nil
 }
@@ -299,12 +375,33 @@ func FindBinary() (string, error) {
 	return "", fmt.Errorf("binário crompressor não encontrado (use CROMPRESSOR_BIN=/caminho/crompressor ou coloque em bin/crompressor)")
 }
 
-// Save persiste config e manifest atomicamente.
+// Save persiste config e manifest atomicamente. Se o manifest mudou em disco
+// desde a última sincronização (outro processo gravou — CLI com o residente
+// rodando), faz merge por UID antes de escrever: ninguém perde mutações.
+// Antes de sobrescrever, rotaciona uma cópia do manifest (manifest.json.bak)
+// — recuperação barata contra disco cheio/corrupção.
 func (s *Store) Save() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	if st, err := os.Stat(s.manPath); err == nil {
+		if !s.lastSync.IsZero() && (!st.ModTime().Equal(s.lastSync) || st.Size() != s.lastSize) {
+			s.mergeExternal()
+		}
+	}
 	if err := writeJSON(filepath.Join(s.Cfg.Root, "config.json"), s.Cfg); err != nil {
 		return err
 	}
-	return writeJSON(s.manPath, s.Man)
+	if b, err := os.ReadFile(s.manPath); err == nil {
+		_ = os.WriteFile(s.manPath+".bak", b, 0o644)
+	}
+	if err := writeJSON(s.manPath, s.Man); err != nil {
+		return err
+	}
+	if st, err := os.Stat(s.manPath); err == nil {
+		s.saveMuHeldSync(st)
+	}
+	s.clearSyncState()
+	return nil
 }
 
 // DefaultBrainPath retorna o codebook padrão do cofre, se existir.
@@ -368,6 +465,105 @@ func writeJSON(path string, v any) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// readConfig lê config.json para detectar mudanças externas (merge).
+func readConfig(p string) (*Config, error) {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	var c Config
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// saveMuHeldSync atualiza os marcadores de sincronização (chamar só com
+// saveMu tomado, logo após gravar o manifest).
+func (s *Store) saveMuHeldSync(st os.FileInfo) {
+	s.lastSync = st.ModTime()
+	s.lastSize = st.Size()
+}
+
+// clearSyncState zera os marcadores após um Save bem-sucedido (o disco
+// reflete o nosso estado; mutações futuras serão novas marcações).
+func (s *Store) clearSyncState() {
+	s.dataMu.Lock()
+	s.dirty = map[string]bool{}
+	s.deleted = map[string]bool{}
+	s.dirtyFolders = map[string]bool{}
+	s.deletedFolders = map[string]bool{}
+	s.dataMu.Unlock()
+	s.cfgDirty = false
+	s.loadedDefault = s.Cfg.DefaultBrain
+}
+
+// mergeExternal incorpora no estado local o que outro processo gravou no
+// manifest em disco. Autoridade do disco: entradas ausentes nele são
+// removidas daqui; presentes são adotadas, exceto as com mutação local não
+// sincronizada (dirty) — nessas a versão local vence. Roda com saveMu
+// tomado e adquire dataMu (ordem fixa: s.mu → saveMu → dataMu).
+func (s *Store) mergeExternal() {
+	m, err := loadManifest(s.manPath)
+	if err != nil {
+		return // disco corrompido/ilegível: não sobrescrever com merge vazio
+	}
+	s.dataMu.Lock()
+	defer s.dataMu.Unlock()
+	diskByUID := map[string]bool{}
+	merged := make([]*Entry, 0, len(m.Entries)+len(s.Man.Entries))
+	for _, e := range m.Entries {
+		diskByUID[e.UID] = true
+		if s.deleted[e.UID] {
+			continue // removido por nós — não ressuscitar
+		}
+		merged = append(merged, e)
+	}
+	for _, e := range s.Man.Entries {
+		if !s.dirty[e.UID] {
+			continue // disco é autoridade (inclui remoções externas)
+		}
+		if diskByUID[e.UID] {
+			// presente nos dois: mutação local mais recente vence
+			for i := range merged {
+				if merged[i].UID == e.UID {
+					merged[i] = e
+					break
+				}
+			}
+		} else {
+			merged = append(merged, e) // adição nossa que o disco ainda não viu
+		}
+	}
+	s.Man.Entries = merged
+
+	// pastas: disco − deletedFolders ∪ dirtyFolders
+	have := map[string]bool{}
+	folders := make([]string, 0, len(m.Folders)+len(s.dirtyFolders))
+	for _, f := range m.Folders {
+		if !s.deletedFolders[f] && !have[f] {
+			have[f] = true
+			folders = append(folders, f)
+		}
+	}
+	for _, f := range s.Man.Folders {
+		if s.dirtyFolders[f] && !have[f] {
+			have[f] = true
+			folders = append(folders, f)
+		}
+	}
+	sort.Strings(folders)
+	s.Man.Folders = folders
+
+	// config: adota DefaultBrain mudado externamente (ex.: CLI brain use)
+	if diskCfg, err := readConfig(filepath.Join(s.Cfg.Root, "config.json")); err == nil {
+		if diskCfg.DefaultBrain != s.loadedDefault && !s.cfgDirty {
+			s.Cfg.DefaultBrain = diskCfg.DefaultBrain
+		}
+		s.loadedDefault = s.Cfg.DefaultBrain
+	}
 }
 
 // SHA256File calcula o hash streaming de um arquivo.

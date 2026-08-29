@@ -20,7 +20,7 @@ func TestHumanBytes(t *testing.T) {
 
 func fakeStore() *Store {
 	return &Store{
-		Man: &Manifest{Version: manifestVersion},
+		Man:     &Manifest{Version: manifestVersion},
 		timeNow: func() time.Time { return time.Unix(0, 0) },
 	}
 }

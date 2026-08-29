@@ -138,8 +138,9 @@ func (s *Store) AddBrain(src, name string) (string, error) {
 		return "", err
 	}
 	// primeiro brain do cofre vira o default
-	if s.DefaultBrainName() == "" || s.DefaultBrainName() == "" {
+	if s.DefaultBrainName() == "" {
 		s.Cfg.DefaultBrain = name
+		s.cfgDirty = true
 		if err := s.Save(); err != nil {
 			return name, err
 		}
@@ -153,6 +154,7 @@ func (s *Store) UseBrain(name string) error {
 		return fmt.Errorf("codebook não encontrado: %s", name)
 	}
 	s.Cfg.DefaultBrain = strings.TrimSuffix(name, ".cromdb")
+	s.cfgDirty = true
 	return s.Save()
 }
 
