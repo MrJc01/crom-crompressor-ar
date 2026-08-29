@@ -1,0 +1,4 @@
+bin/
+*.crom
+*.cromdb
+dist/

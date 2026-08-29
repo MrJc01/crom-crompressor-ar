@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CROM-AR — Cofre .crom</title>
+<style>
+:root{--bg:#0f1116;--panel:#171a21;--panel2:#1e2230;--line:#2a3040;--txt:#e8eaf0;--dim:#8b93a7;--acc:#5eead4;--acc2:#818cf8;--bad:#f87171;--ok:#4ade80}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+header{display:flex;align-items:center;gap:14px;padding:10px 18px;background:var(--panel);border-bottom:1px solid var(--line)}
+header .logo{font-weight:800;letter-spacing:.5px;font-size:17px}
+header .logo b{color:var(--acc)}
+header .sub{color:var(--dim);font-size:12px}
+header .spacer{flex:1}
+button{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:7px 12px;cursor:pointer;font-size:13px;transition:.15s}
+button:hover{border-color:var(--acc);color:var(--acc)}
+button.primary{background:linear-gradient(135deg,#134e4a,#1e3a8a);border-color:#2dd4bf55}
+button.danger:hover{border-color:var(--bad);color:var(--bad)}
+main{flex:1;display:flex;min-height:0}
+#sidebar{width:250px;background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:10px 8px}
+#sidebar h3{font-size:11px;text-transform:uppercase;color:var(--dim);padding:6px 8px;letter-spacing:1px}
+.tree-item{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:7px;cursor:pointer;color:var(--txt);white-space:nowrap}
+.tree-item:hover{background:var(--panel2)}
+.tree-item.sel{background:#1e3a5f;color:#fff}
+.tree-item .ic{color:var(--acc2)}
+#content{flex:1;display:flex;flex-direction:column;min-width:0}
+#toolbar{display:flex;gap:8px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+#breadcrumb{color:var(--dim);font-size:13px;margin-left:6px}
+#breadcrumb b{color:var(--txt)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{position:sticky;top:0;text-align:left;background:var(--panel);color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px;padding:9px 12px;border-bottom:1px solid var(--line)}
+td{padding:8px 12px;border-bottom:1px solid #20242f}
+tr.row:hover{background:#1a1f2b}
+tr.row.sel{background:#1e3a5f}
+td .nm{font-weight:600}
+td .sz{color:var(--dim)}
+.ratio-good{color:var(--ok)} .ratio-mid{color:#fbbf24} .ratio-bad{color:var(--dim)}
+.badge{font-size:10px;padding:2px 7px;border-radius:20px;background:#1e3a5f;color:#93c5fd;margin-left:6px}
+.badge.dedup{background:#14532d;color:#86efac}
+#listwrap{flex:1;overflow:auto}
+#statusbar{display:flex;gap:18px;padding:8px 16px;border-top:1px solid var(--line);background:var(--panel);color:var(--dim);font-size:12px}
+#statusbar b{color:var(--txt)}
+dialog{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:14px;padding:22px;min-width:420px;max-width:640px}
+dialog::backdrop{background:#000a}
+dialog h2{font-size:16px;margin-bottom:14px}
+dialog label{display:block;color:var(--dim);font-size:12px;margin:10px 0 4px}
+dialog input,dialog select{width:100%;background:var(--bg);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;font-size:13px}
+dialog .row{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
+#modal-out{max-height:300px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;white-space:pre-wrap;font-family:ui-monospace,monospace}
+.ok{color:var(--ok)} .bad{color:var(--bad)}
+.toast{position:fixed;bottom:18px;right:18px;background:var(--panel2);border:1px solid var(--acc);color:var(--txt);padding:10px 16px;border-radius:10px;font-size:13px;display:none;box-shadow:0 8px 30px #0008;z-index:9}
+#progress{display:none;margin-left:auto;color:var(--acc);font-size:12px}
+.empty{padding:60px;text-align:center;color:var(--dim)}
+.empty .big{font-size:44px;margin-bottom:10px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">🧬 CROM<b>-AR</b></div>
+  <div class="sub">cofre deduplicado .crom</div>
+  <div class="spacer"></div>
+  <div id="progress"></div>
+  <button onclick="showStats()">📊 Estatísticas</button>
+  <button onclick="retrain()" title="Retreinar o codebook com os dados do cofre">🧠 Treinar codebook</button>
+      <input id="searchbox" placeholder="🔍 buscar nos .crom (O(1))" style="background:var(--bg);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:7px 10px;font-size:13px;width:220px" onkeydown="if(event.key==='Enter')doSearch()">
+</header>
+<main>
+  <nav id="sidebar">
+    <h3>Pastas</h3>
+    <div id="tree"></div>
+  </nav>
+  <section id="content">
+    <div id="toolbar">
+      <button class="primary" onclick="document.getElementById('pick-files').click()">📥 Importar arquivos</button>
+      <button onclick="document.getElementById('pick-folder').click()">📂 Importar pasta</button>
+      <button onclick="newFolder()">📁+ Nova pasta</button>
+      <button onclick="renFolder()">✏️ Renomear</button>
+      <button class="danger" onclick="delFolder()">🗑️ Excluir pasta</button>
+      <input type="file" id="pick-files" multiple hidden>
+      <input type="file" id="pick-folder" webkitdirectory hidden>
+      <span id="breadcrumb"></span>
+    </div>
+    <div id="listwrap">
+      <table>
+        <thead><tr><th style="width:30px"><input type="checkbox" id="sel-all" onchange="toggleAll(this)"></th><th>Nome</th><th>Tamanho</th><th>.crom</th><th>Ratio</th><th>Hit</th><th>Importado</th><th style="width:220px">Ações</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty" class="empty" style="display:none"><div class="big">🗄️</div>Cofre vazio.<br>Use <b>Importar arquivos</b> ou <b>Importar pasta</b> para começar — dedup automático inclusa.</div>
+    </div>
+    <div id="statusbar"><span>📍 <b id="st-folder">/</b></span><span>arquivos: <b id="st-files">0</b></span><span>origem: <b id="st-orig">0</b></span><span>armazenado: <b id="st-stored">0</b></span><span>dedup poupou: <b id="st-dedup">0</b></span></div>
+  </section>
+</main>
+
+<dialog id="dlg-extract"><h2>⬇️ Extrair (recompilar no HD)</h2>
+  <label>Diretório de destino (absoluto)</label>
+  <input id="ex-dest" placeholder="/home/j/crom-restore">
+  <div class="row"><button onclick="this.closest('dialog').close()">Cancelar</button><button class="primary" onclick="doExtract()">Extrair com verificação SHA-256</button></div>
+  <div id="ex-out" style="display:none;margin-top:14px"><label>Resultado</label><div id="modal-out"></div><div class="row"><button onclick="openExtracted()">📁 Abrir pasta extraída</button></div></div>
+</dialog>
+
+<dialog id="dlg-stats"><h2>📊 Estatísticas do cofre</h2><div id="modal-out2" style="max-height:340px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;font-size:13px"></div>
+<div class="row"><button onclick="this.closest('dialog').close()">Fechar</button></div></dialog>
+
+<dialog id="dlg-info"><h2>🔎 Detalhes do .crom</h2><div id="modal-out3" style="max-height:400px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;font-size:12px;white-space:pre;font-family:ui-monospace,monospace"></div>
+<div class="row"><button onclick="this.closest('dialog').close()">Fechar</button></div></dialog>
+
+<dialog id="dlg-move"><h2>📍 Mover para pasta</h2>
+  <label>Pasta de destino (caminho virtual)</label><select id="mv-sel"></select>
+  <div class="row"><button onclick="this.closest('dialog').close()">Cancelar</button><button class="primary" onclick="doMove()">Mover</button></div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+<script>
+const TOKEN=new URLSearchParams(location.search).get("t")||"";
+let DATA={folders:[],entries:[]};
+let CUR="/";
+let LAST_EXTRACT_DIR=null;
+const sel=new Set();
+const fmtB=n=>{if(n==null)return"0 B";const u=["B","KB","MB","GB","TB"];let i=0,x=n;while(x>=1024&&i<4){x/=1024;i++}return x.toFixed(x<10&&i>0?1:0)+" "+u[i]};
+const esc=s=>(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function toast(m){const t=document.getElementById("toast");t.textContent=m;t.style.display="block";clearTimeout(t._h);t._h=setTimeout(()=>t.style.display="none",3500)}
+function prog(m){const p=document.getElementById("progress");p.textContent=m||"";p.style.display=m?"inline":"none"}
+async function api(path,opts={}){opts.headers=Object.assign({"X-Crom-Token":TOKEN},opts.headers||{});const r=await fetch(path,opts);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
+function curPrefix(){return CUR==="/"?"":"/"}
+
+async function refresh(){
+  DATA=await api("/api/tree");
+  renderTree();renderRows();
+  const st=await api("/api/stats");
+  document.getElementById("st-files").textContent=st.files;
+  document.getElementById("st-orig").textContent=fmtB(st.original);
+  document.getElementById("st-stored").textContent=fmtB(st.stored);
+  document.getElementById("st-dedup").textContent=fmtB(st.dedup_saved);
+}
+function renderTree(){
+  const t=document.getElementById("tree");t.innerHTML="";
+  const root=document.createElement("div");root.className="tree-item"+(CUR==="/"?" sel":"");
+  root.innerHTML='<span class="ic">🏠</span> Cofre';
+  root.onclick=()=>{CUR="/";refresh()};t.appendChild(root);
+  const add=(nodes,depth)=>{for(const n of nodes){
+    const d=document.createElement("div");d.className="tree-item"+(CUR===n.path?" sel":"");
+    d.style.paddingLeft=(9+depth*14)+"px";
+    d.innerHTML=`<span class="ic">📁</span> ${esc(n.name)}`;
+    d.onclick=()=>{CUR=n.path;refresh()};t.appendChild(d);
+    add(n.children||[],depth+1);
+  }};
+  add(DATA.folders,1);
+}
+function visibleEntries(){
+  const p=curPrefix();
+  return DATA.entries.filter(e=>e.folder===CUR);
+}
+function renderRows(){
+  const tb=document.getElementById("rows");tb.innerHTML="";
+  const es=visibleEntries();
+  document.getElementById("empty").style.display=es.length?"none":"block";
+  document.getElementById("breadcrumb").innerHTML="📍 <b>"+esc(CUR)+"</b>";
+  document.getElementById("st-folder").textContent=CUR;
+  for(const e of es){
+    const r=e.size?e.crom_size/e.size*100:0;
+    const cls=r<60?"ratio-good":r<95?"ratio-mid":"ratio-bad";
+    const tr=document.createElement("tr");tr.className="row";
+    tr.innerHTML=`<td><input type="checkbox" data-uid="${e.uid}" ${sel.has(e.uid)?"checked":""} onchange="selChk(this)"></td>
+      <td><span class="nm">${esc(e.name)}</span>${e.dedup?'<span class="badge dedup">dedup</span>':""}${!e.verified?'<span class="badge" style="background:#7f1d1d">sem check</span>':""}<br><span class="sz">${esc(e.rel_path||"")}</span></td>
+      <td class="sz">${fmtB(e.size)}</td><td class="sz">${fmtB(e.crom_size)}</td>
+      <td class="${cls}">${r.toFixed(1)}%</td>
+      <td class="sz">${e.hit_rate?e.hit_rate.toFixed(0)+"%":"—"}</td>
+      <td class="sz">${new Date(e.packed_at).toLocaleString("pt-BR",{dateStyle:"short",timeStyle:"short"})}</td>
+      <td>
+        <button onclick="openExtract([${JSON.stringify(e.uid)}])">⬇️ Extrair</button>
+        <button onclick="openMove([${JSON.stringify(e.uid)}])">📍</button>
+        <button onclick="showInfo(${JSON.stringify(e.uid)})">🔎</button>
+        <button class="danger" onclick="delEntries([${JSON.stringify(e.uid)}])">🗑️</button>
+      </td>`;
+    tb.appendChild(tr);
+  }
+}
+function selChk(cb){cb.checked?sel.add(cb.dataset.uid):sel.delete(cb.dataset.uid)}
+function toggleAll(cb){document.querySelectorAll("#rows input[type=checkbox]").forEach(c=>{c.checked=cb.checked;selChk(c)})}
+function selOrFolder(){if(sel.size)return[...sel];const es=visibleEntries();if(!es.length){toast("Nada selecionado");return null}return es.map(e=>e.uid)}
+
+async function newFolder(){
+  const name=prompt("Nome da nova pasta dentro de "+CUR+":");if(!name)return;
+  const path=CUR.replace(/\/$/,"")+"/"+name;
+  await api("/api/folder/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path})});
+  toast("Pasta criada");refresh();
+}
+async function renFolder(){
+  if(CUR==="/"){toast("Selecione uma pasta na árvore");return}
+  const name=prompt("Novo nome para "+CUR+":",CUR.split("/").pop());if(!name)return;
+  await api("/api/folder/rename",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:CUR,name})});
+  toast("Renomeada");refresh();
+}
+async function delFolder(){
+  if(CUR==="/"){toast("Selecione uma pasta na árvore");return}
+  if(!confirm("Excluir pasta "+CUR+"? Os arquivos voltam para a pasta pai."))return;
+  await api("/api/folder/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:CUR})});
+  CUR="/";toast("Pasta excluída");refresh();
+}
+async function openMove(uids){
+  const selEl=document.getElementById("mv-sel");
+  selEl.innerHTML=DATA.flat.map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join("");
+  selEl.value=CUR;
+  document.getElementById("dlg-move").showModal();
+  document.getElementById("dlg-move")._uids=uids;
+}
+async function doMove(){
+  const d=document.getElementById("dlg-move");
+  await api("/api/move",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({uids:d._uids,folder:document.getElementById("mv-sel").value})});
+  d.close();sel.clear();toast("Movido");refresh();
+}
+async function delEntries(uids){
+  if(!confirm("Remover "+uids.length+" entrada(s) do cofre? (os .crom órfãos são apagados)"))return;
+  await api("/api/entries/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({uids})});
+  sel.clear();toast("Removido");refresh();
+}
+function openExtract(uids){
+  document.getElementById("ex-dest").value=LAST_EXTRACT_DIR||"/home/j/crom-restore";
+  document.getElementById("ex-out").style.display="none";
+  document.getElementById("dlg-extract")._uids=uids;
+  document.getElementById("dlg-extract").showModal();
+}
+async function doExtract(){
+  const d=document.getElementById("dlg-extract");
+  const dest=document.getElementById("ex-dest").value.trim();
+  prog("extraindo…");
+  try{
+    const j=await api("/api/extract",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({uids:d._uids,dest,force:true})});
+    LAST_EXTRACT_DIR=dest;
+    const out=document.getElementById("modal-out");
+    out.textContent=j.results.map(r=>(r.ok?"✔ ":"✘ ")+r.target+(r.err?" — "+r.err:"")).join("\n");
+    document.getElementById("ex-out").style.display="block";
+    d._dir=dest;toast("Extração concluída");
+  }catch(e){alert("Erro: "+e.message)}
+  prog("");refresh();
+}
+async function openExtracted(){
+  await api("/api/open?path="+encodeURIComponent(document.getElementById("dlg-extract")._dir));
+}
+async function showStats(){
+  const st=await api("/api/stats");
+  const pkgs=await api("/api/packages");
+  const rows=pkgs.map(p=>`<tr><td>${esc(p.group)}</td><td>${p.members}</td><td>${fmtB(p.original)}</td><td>${fmtB(p.crom)}</td><td class="${p.ratio<60?"ok":p.ratio<95?"":"bad"}">${p.ratio.toFixed(1)}%</td><td>${p.avg_hit?p.avg_hit.toFixed(0)+"%":"—"}</td></tr>`).join("");
+  document.getElementById("modal-out2").innerHTML=
+    `<b>${st.files}</b> arquivos lógicos · <b>${st.unique}</b> conteúdos únicos<br>
+     origem: <b>${fmtB(st.original)}</b> · armazenado: <b>${fmtB(st.stored)}</b><br>
+     dedup poupou: <b class="ok">${fmtB(st.dedup_saved)}</b><br>
+     ratio médio: <b>${st.avg_ratio.toFixed(1)}%</b> · disco: <b>${fmtB(st.vault_on_disk)}</b>
+     <h3 style="margin:12px 0 6px;font-size:13px">📦 Pacotes</h3>
+     <table style="width:100%;font-size:12px"><tr style="color:var(--dim)"><th>pacote</th><th>membros</th><th>origem</th><th>.crom</th><th>ratio</th><th>hit</th></tr>${rows||'<tr><td colspan="6">nenhum pacote — crie em arquivos/</td></tr>'}</table>`;
+  document.getElementById("dlg-stats").showModal();
+}
+async function doSearch(){
+  const q=document.getElementById("searchbox").value.trim();
+  if(!q)return;
+  prog("buscando…");
+  try{
+    const j=await api("/api/search?q="+encodeURIComponent(q));
+    document.getElementById("modal-out3").textContent=j.hits.length?j.hits.map(h=>"["+h.name+"] "+h.line).join("\n"):"nenhum resultado";
+    document.getElementById("dlg-info").showModal();
+  }catch(e){alert("Erro: "+e.message)}
+  prog("");
+}
+async function showInfo(uid){
+  const r=await fetch("/api/info?uid="+uid,{headers:{"X-Crom-Token":TOKEN}});const t=await r.text();
+  document.getElementById("modal-out3").textContent=t;
+  document.getElementById("dlg-info").showModal();
+}
+async function retrain(){
+  if(!confirm("Retreinar o codebook do cofre com os dados importados?"))return;
+  prog("treinando codebook…");
+  try{await api("/api/train",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});toast("Codebook atualizado 🧠")}
+  catch(e){alert("Erro: "+e.message)}
+  prog("");
+}
+function upload(input,asFolder){
+  const files=[...input.files];if(!files.length)return;
+  const fd=new FormData();
+  files.forEach((f,i)=>{
+    fd.append("f"+i,f,f.name);
+    fd.append("r"+i,asFolder?(f.webkitRelativePath||f.name):f.name);
+  });
+  fd.append("folder",CUR);
+  const xhr=new XMLHttpRequest();
+  xhr.open("POST","/api/import");
+  xhr.setRequestHeader("X-Crom-Token",TOKEN);
+  xhr.upload.onprogress=ev=>{if(ev.lengthComputable)prog(`importando… ${Math.round(ev.loaded/ev.total*100)}%`)};
+  xhr.onload=()=>{
+    prog("");
+    try{
+      const j=JSON.parse(xhr.responseText);
+      if(xhr.status!==200){alert("Erro: "+(j.error||xhr.status));return}
+      toast(`✔ ${j.imported} arquivo(s) importado(s)`);
+    }catch(e){alert("Resposta inválida do servidor")}
+    input.value="";refresh();
+  };
+  xhr.onerror=()=>{prog("");alert("Falha de rede no upload")};
+  xhr.send(fd);
+  toast(`Enviando ${files.length} arquivo(s)…`);
+}
+document.getElementById("pick-files").onchange=e=>upload(e.target,false);
+document.getElementById("pick-folder").onchange=e=>upload(e.target,true);
+refresh();
+</script>
+</body>
+</html>
