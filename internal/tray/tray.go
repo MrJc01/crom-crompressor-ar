@@ -264,13 +264,14 @@ func openGUI(target string) {
 	// o xdg-open/gio pode perder a URL quando o Chrome mostra o seletor
 	// de perfis/contas na inicialização.
 	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
-		if chromeFamilyRunning() {
-			// navegador já aberto: xdg-open entrega como ABA na janela ativa
+		exe := defaultBrowserExec()
+		if exe != "" && exeRunning(exe) {
+			// o navegador PADRÃO está rodando: xdg-open entrega como aba
 			_ = exec.Command("xdg-open", target).Start()
 			return
 		}
-		if exe := defaultBrowserExec(); exe != "" {
-			// fechado: lança direto no último perfil (sem seletor de contas)
+		if exe != "" {
+			// padrão fechado: lança direto no último perfil (sem seletor de contas)
 			args := append(chromeProfileArgs(exe), target)
 			if err := exec.Command(exe, args...).Start(); err == nil {
 				return
@@ -311,8 +312,13 @@ func chromeProfileArgs(exe string) []string {
 	return []string{"--profile-directory=" + st.Profile.LastUsed}
 }
 
-// chromeFamilyRunning detecta navegador Chromium-family já em execução.
-func chromeFamilyRunning() bool {
+// exeRunning verifica se um executável específico tem processo ativo
+// (lendo /proc/*/exe — precisa do resolved path).
+func exeRunning(exePath string) bool {
+	resolved, err := filepath.EvalSymlinks(exePath)
+	if err != nil {
+		resolved = exePath
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return false
@@ -321,13 +327,14 @@ func chromeFamilyRunning() bool {
 		if !e.IsDir() {
 			continue
 		}
-		b, err := os.ReadFile("/proc/" + e.Name() + "/comm")
+		if _, err := os.Stat(filepath.Join("/proc", e.Name(), "cmdline")); err != nil {
+			continue // não é nosso processo
+		}
+		link, err := os.Readlink("/proc/" + e.Name() + "/exe")
 		if err != nil {
 			continue
 		}
-		c := strings.ToLower(strings.TrimSpace(string(b)))
-		if strings.Contains(c, "chrome") || strings.Contains(c, "chromium") ||
-			strings.Contains(c, "brave") || strings.Contains(c, "edge") {
+		if link == resolved {
 			return true
 		}
 	}
