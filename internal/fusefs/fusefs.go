@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -850,4 +851,26 @@ func IsMounted(mountpoint string) bool {
 		}
 	}
 	return false
+}
+
+// IsMountedHealthy: montado E respondendo (o transporte pode estar morto
+// após o processo dono morrer sem desmontar).
+func IsMountedHealthy(mountpoint string) bool {
+	if !IsMounted(mountpoint) {
+		return false
+	}
+	_, err := os.Stat(mountpoint)
+	return err == nil
+}
+
+// RecoverStaleMount desmonta uma montagem órfã (transporte morto).
+func RecoverStaleMount(mountpoint string) {
+	if !IsMounted(mountpoint) {
+		return
+	}
+	if _, err := os.Stat(mountpoint); err == nil {
+		return // saudável
+	}
+	_ = exec.Command("fusermount3", "-u", mountpoint).Run()
+	_ = exec.Command("umount", "-l", mountpoint).Run()
 }

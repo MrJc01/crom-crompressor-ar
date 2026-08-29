@@ -250,7 +250,8 @@ func cmdCD(args []string) error {
 			return fmt.Errorf("uso: crom-ar cd mount <pacote.cromar> -m <ponto> [--daemon]")
 		}
 		mountpoint := vault.ExpandHome(*mp)
-		if fusefs.IsMounted(mountpoint) {
+		fusefs.RecoverStaleMount(mountpoint)
+		if fusefs.IsMountedHealthy(mountpoint) {
 			fmt.Println("já montado em", mountpoint)
 			return nil
 		}
@@ -607,7 +608,8 @@ func cmdFuse(args []string) error {
 		return nil
 	}
 
-	if fusefs.IsMounted(mountpoint) {
+	fusefs.RecoverStaleMount(mountpoint)
+	if fusefs.IsMountedHealthy(mountpoint) {
 		fmt.Println("já montado em", mountpoint)
 		return nil
 	}

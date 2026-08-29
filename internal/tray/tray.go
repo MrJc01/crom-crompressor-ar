@@ -12,8 +12,11 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sync"
+	"syscall"
+	"time"
 
 	"fyne.io/systray"
 
@@ -47,11 +50,22 @@ type App struct {
 }
 
 // Run executa o app de bandeija (bloqueia até Sair).
+// SIGTERM (systemd stop) desmonta com elegância antes de encerrar.
 func Run(st *vault.Store, opt Options) error {
 	app := &App{st: st, opt: opt}
 	if opt.WebAddr == "" {
 		opt.WebAddr = "127.0.0.1:8619"
 	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fusefs.RecoverStaleMount(opt.Mountpoint)
+		if fusefs.IsMounted(opt.Mountpoint) {
+			_ = exec.Command("fusermount3", "-u", opt.Mountpoint).Run()
+		}
+		systray.Quit()
+	}()
 	systray.Run(app.onReady, app.onExit)
 	return nil
 }
@@ -82,7 +96,7 @@ func (a *App) onReady() {
 	systray.AddSeparator()
 	onClick(systray.AddMenuItem("Sair", "Encerra o crom-ar residente (mantém montagem)"), systray.Quit)
 
-	if !a.opt.NoAutoMount && !fusefs.IsMounted(a.opt.Mountpoint) {
+	if !a.opt.NoAutoMount && !fusefs.IsMountedHealthy(a.opt.Mountpoint) {
 		a.mount()
 	}
 	if !a.opt.NoWeb {
@@ -120,6 +134,11 @@ func (a *App) refreshMenu() {
 }
 
 func (a *App) toggleMount() {
+	if fusefs.IsMounted(a.opt.Mountpoint) && !fusefs.IsMountedHealthy(a.opt.Mountpoint) {
+		fusefs.RecoverStaleMount(a.opt.Mountpoint)
+		a.refreshMenu()
+		return
+	}
 	if fusefs.IsMounted(a.opt.Mountpoint) {
 		if err := execFusermount(a.opt.Mountpoint); err != nil {
 			fmt.Fprintf(os.Stderr, "! desmontagem falhou: %v\n", err)
@@ -131,7 +150,8 @@ func (a *App) toggleMount() {
 }
 
 func (a *App) mount() {
-	if fusefs.IsMounted(a.opt.Mountpoint) {
+	fusefs.RecoverStaleMount(a.opt.Mountpoint)
+	if fusefs.IsMountedHealthy(a.opt.Mountpoint) {
 		return
 	}
 	srv, _, err := fusefs.MountServer(a.opt.Mountpoint, a.st.Cfg.Root, "", false)
@@ -143,8 +163,16 @@ func (a *App) mount() {
 }
 
 func (a *App) openVault() {
-	if !fusefs.IsMounted(a.opt.Mountpoint) {
+	fusefs.RecoverStaleMount(a.opt.Mountpoint)
+	if !fusefs.IsMountedHealthy(a.opt.Mountpoint) {
 		a.mount()
+		// espera a montagem ficar saudável (até 5s)
+		for i := 0; i < 25; i++ {
+			if fusefs.IsMountedHealthy(a.opt.Mountpoint) {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
 	}
 	openGUI(a.opt.Mountpoint)
 }
