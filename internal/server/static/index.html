@@ -339,30 +339,26 @@ async function retrain(){
   catch(e){alert("Erro: "+e.message)}
   prog("");
 }
-function upload(input,asFolder){
+async function upload(input,asFolder){
   const files=[...input.files];if(!files.length)return;
-  const fd=new FormData();
-  files.forEach((f,i)=>{
-    fd.append("f"+i,f,f.name);
-    fd.append("r"+i,asFolder?(f.webkitRelativePath||f.name):f.name);
-  });
-  fd.append("folder",CUR);
-  const xhr=new XMLHttpRequest();
-  xhr.open("POST","/api/import");
-  xhr.setRequestHeader("X-Crom-Token",TOKEN);
-  xhr.upload.onprogress=ev=>{if(ev.lengthComputable)prog(`importando… ${Math.round(ev.loaded/ev.total*100)}%`)};
-  xhr.onload=()=>{
-    prog("");
+  input.value="";
+  let done=0,ok=0,fail=0;
+  // um arquivo por requisição: progresso real por item e sem limite de 64MB do lote
+  for(const f of files){
+    const fd=new FormData();
+    fd.append("f0",f,f.name);
+    fd.append("r0",asFolder?(f.webkitRelativePath||f.name):f.name);
+    fd.append("folder",CUR);
+    prog(`importando ${done+1}/${files.length} · ${f.name}`);
     try{
-      const j=JSON.parse(xhr.responseText);
-      if(xhr.status!==200){alert("Erro: "+(j.error||xhr.status));return}
-      toast(`✔ ${j.imported} arquivo(s) importado(s)`);
-    }catch(e){alert("Resposta inválida do servidor")}
-    input.value="";refresh();
-  };
-  xhr.onerror=()=>{prog("");alert("Falha de rede no upload")};
-  xhr.send(fd);
-  toast(`Enviando ${files.length} arquivo(s)…`);
+      const j=await api("/api/import",{method:"POST",body:fd});
+      ok+=j.imported||0;
+    }catch(e){fail++;toast("✘ "+f.name+": "+e.message)}
+    done++;
+  }
+  prog("");
+  refresh();
+  toast(`✔ ${ok} arquivo(s) importado(s)${fail?` · ${fail} falha(s)`:""}`);
 }
 document.getElementById("pick-files").onchange=e=>upload(e.target,false);
 document.getElementById("pick-folder").onchange=e=>upload(e.target,true);

@@ -216,6 +216,12 @@ func (sv *Server) home(w http.ResponseWriter, r *http.Request) {
 	w.Write(indexHTML)
 }
 
+// logOp registra ações mutantes do painel no stderr — sob systemd isso vai
+// para o journal do residente (journalctl --user -u crom-ar).
+func logOp(op, detail string) {
+	fmt.Fprintf(os.Stderr, "[crom-ar %s] %s: %s\n", time.Now().Format("2006-01-02 15:04:05"), op, detail)
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(v)
@@ -295,6 +301,7 @@ func (sv *Server) folderCreate(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
+	logOp("pasta", "criada "+req.Path)
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -344,6 +351,7 @@ func (sv *Server) move(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	logOp("move", fmt.Sprintf("%d entrada(s) → %s", len(req.UIDs), req.Folder))
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -370,6 +378,7 @@ func (sv *Server) entriesDelete(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
+	logOp("delete", fmt.Sprintf("%d entrada(s) removida(s)", n))
 	writeJSON(w, map[string]any{"ok": true, "removed": n})
 }
 
@@ -408,6 +417,7 @@ func (sv *Server) extract(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
+	logOp("extract", fmt.Sprintf("%d arquivo(s) → %s", len(results), req.Dest))
 	writeJSON(w, map[string]any{"results": results})
 }
 
@@ -538,6 +548,7 @@ func (sv *Server) importFiles(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
+	logOp("import", fmt.Sprintf("%d arquivo(s) em %s", len(results), target))
 	var summary []map[string]any
 	for _, res := range results {
 		summary = append(summary, map[string]any{

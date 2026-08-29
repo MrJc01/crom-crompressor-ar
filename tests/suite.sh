@@ -325,5 +325,40 @@ hdst=$(sha256sum "$MNT/rsync-dst/a.txt" 2>/dev/null | cut -d' ' -f1)
 check "T17b sha pos-rsync" "$hsrc" "$hdst"
 
 echo "════════════════════════════════"
+# S18 - doctor: manifest corrompido restaurado do .bak + prune de orfaos
+# (vault isolado - nao toca no vault principal da suite)
+echo "— S18 Doctor —"
+DR=$R/doctor-vault
+CROM_AR_ROOT=$DR CROMPRESSOR_BIN=$CROMPRESSOR_BIN $BIN init >/dev/null
+echo "documento do doctor $RANDOM" > /tmp/suite-doc-dr.txt
+CROM_AR_ROOT=$DR CROMPRESSOR_BIN=$CROMPRESSOR_BIN $BIN add /tmp/suite-doc-dr.txt >/dev/null 2>&1
+CROM_AR_ROOT=$DR $BIN doctor 2>/dev/null | grep -q "tudo saudável" && ok "T18a doctor saudável" || bad "T18a doctor"
+# orfao: .crom sem entrada
+echo lixo > "$DR/vault/orfao00000000000000000000000000000000000000000000000000000000000000.crom"
+CROM_AR_ROOT=$DR $BIN doctor 2>/dev/null | grep -q "rode: crom-ar doctor --prune" && ok "T18b doctor detecta órfão" || bad "T18b detecção"
+CROM_AR_ROOT=$DR $BIN doctor --prune >/dev/null 2>&1
+[ ! -f "$DR/vault/orfao00000000000000000000000000000000000000000000000000000000000000.crom" ] && ok "T18c --prune apagou órfão" || bad "T18c prune"
+# manifest corrompido -> --fix restaura do .bak
+echo '{"corrompido' > "$DR/manifest.json"
+CROM_AR_ROOT=$DR $BIN doctor 2>/dev/null | grep -q "doctor --fix" && ok "T18d doctor sugere --fix" || bad "T18d sugestão"
+CROM_AR_ROOT=$DR $BIN doctor --fix >/dev/null 2>&1
+python3 -c "
+import json,sys
+m=json.load(open('$DR/manifest.json'))
+sys.exit(0 if any(e['name']=='suite-doc-dr.txt' for e in m['entries']) else 1)" && ok "T18e --fix restaurou manifest do .bak" || bad "T18e restore"
+
+# S19 - token rotate: novo valor, 0600, dono preservado
+echo "— S19 Token —"
+export CROM_AR_TOKEN_FILE=$R/s19-token
+rm -f "$R/s19-token"
+CROM_AR_ROOT=$DR CROMPRESSOR_BIN=$CROMPRESSOR_BIN $BIN token rotate >/dev/null 2>&1 && ok "T19a rotate roda" || bad "T19a rotate"
+T1=$(cat "$R/s19-token" 2>/dev/null)
+CROM_AR_ROOT=$DR CROMPRESSOR_BIN=$CROMPRESSOR_BIN $BIN token rotate >/dev/null 2>&1
+T2=$(cat "$R/s19-token" 2>/dev/null)
+[ -n "$T1" ] && [ -n "$T2" ] && [ "$T1" != "$T2" ] && ok "T19b token mudou" || bad "T19b token"
+[ "$(stat -c%a "$R/s19-token")" = "600" ] && ok "T19c token 0600" || bad "T19c permissões"
+unset CROM_AR_TOKEN_FILE
+
+echo "════════════════════════════════"
 echo "TOTAL: PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

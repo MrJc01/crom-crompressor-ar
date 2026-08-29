@@ -163,3 +163,39 @@ func TestUpdateLocalVenceNoMerge(t *testing.T) {
 		t.Fatalf("move não aplicou: %s", e.Path)
 	}
 }
+
+// 5) Config: DefaultBrain mudado externamente é adotado no merge —
+// mas NÃO quando a mudança foi local (cfgDirty).
+func TestMergeAdotaConfigExterna(t *testing.T) {
+	s1, s2 := loadPair(t)
+	if err := os.WriteFile(filepath.Join(s1.Cfg.BrainsDir, "b1.cromdb"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s1.Cfg.BrainsDir, "b2.cromdb"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// CLI troca o padrão no disco
+	if err := s2.UseBrain("b1"); err != nil {
+		t.Fatal(err)
+	}
+	// residente com memória velha salva → adota a config externa
+	if err := s1.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if s1.Cfg.DefaultBrain != "b1" {
+		t.Fatalf("residente não adotou DefaultBrain externo: %q", s1.Cfg.DefaultBrain)
+	}
+	// negativo: mudança LOCAL (cfgDirty) não é sobrescrita pelo disco
+	if err := s1.UseBrain("b2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(s1.Cfg.Root, "config.json"), map[string]string{"default_brain": "b1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if s1.Cfg.DefaultBrain != "b2" {
+		t.Fatalf("cfgDirty deveria prevalecer sobre o disco: %q", s1.Cfg.DefaultBrain)
+	}
+}
