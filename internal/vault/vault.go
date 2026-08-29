@@ -169,6 +169,26 @@ func (s *Store) migrate() {
 		changed = true
 	}
 	sort.Strings(s.Man.Folders)
+	// limpa lixeiras criadas por gerenciadores de arquivos dentro do cofre
+	clean := s.Man.Folders[:0]
+	for _, f := range s.Man.Folders {
+		if !strings.Contains(f, "/.Trash-") && !strings.Contains(f, "/.Trash/") {
+			clean = append(clean, f)
+		}
+	}
+	if len(clean) != len(s.Man.Folders) {
+		s.Man.Folders = clean
+		changed = true
+	}
+	kept := s.Man.Entries[:0]
+	for _, e := range s.Man.Entries {
+		if strings.Contains(e.Path, "/.Trash-") || strings.Contains(e.Path, "/.Trash/") {
+			changed = true
+			continue
+		}
+		kept = append(kept, e)
+	}
+	s.Man.Entries = kept
 	for _, e := range s.Man.Entries {
 		if e.UID == "" {
 			e.UID = randomUID()

@@ -326,6 +326,9 @@ func (v *VaultFS) lookup(name string) (dir bool, entry *vault.Entry) {
 	if name == "" || name == "/" {
 		return true, nil
 	}
+	if isTrashPath(name) {
+		return false, nil
+	}
 	if v.st.HasFolder(vault.NormalizeFolderInput(name)) {
 		return true, nil
 	}
@@ -571,8 +574,17 @@ func (v *VaultFS) Unlink(name string, ctx *fuse.Context) fuse.Status {
 	return fuse.OK
 }
 
+// isTrashPath identifica caminhos da lixeira do gerenciador (não pertencem
+// ao cofre — deletar no Nemo = apagar de verdade, como WinRAR).
+func isTrashPath(p string) bool {
+	return strings.Contains(p, "/.Trash-") || strings.Contains(p, "/.Trash/")
+}
+
 // Mkdir cria pasta virtual.
 func (v *VaultFS) Mkdir(name string, mode uint32, ctx *fuse.Context) fuse.Status {
+	if isTrashPath(cleanPath(name)) {
+		return fuse.EPERM
+	}
 	if err := v.st.CreateFolder(name); err != nil {
 		return fuse.Status(syscall.EEXIST)
 	}
@@ -622,6 +634,9 @@ func (v *VaultFS) Rmdir(name string, ctx *fuse.Context) fuse.Status {
 func (v *VaultFS) Rename(oldName, newName string, ctx *fuse.Context) fuse.Status {
 	oldName = cleanPath(oldName)
 	newName = cleanPath(newName)
+	if isTrashPath(oldName) || isTrashPath(newName) {
+		return fuse.EPERM
+	}
 	// pendente e já fechado: importa antes de renomear (o dado precisa existir)
 	if p := v.getPending(oldName); p != nil && !p.orphan {
 		v.importPending(oldName, p)
@@ -710,7 +725,10 @@ func (v *VaultFS) OpenDir(name string, ctx *fuse.Context) ([]fuse.DirEntry, fuse
 	}
 	dirs := map[string]bool{}
 	for _, fo := range v.st.Man.Folders {
-		if fo != "/" && path.Dir(fo) == name {
+		if fo == "/" || isTrashPath(fo) {
+			continue
+		}
+		if path.Dir(fo) == name {
 			dirs[path.Base(fo)] = true
 		}
 	}

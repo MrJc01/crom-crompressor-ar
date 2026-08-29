@@ -121,6 +121,24 @@ func (sv *Server) secure(next http.Handler) http.Handler {
 			}
 		}
 		if !sv.checkToken(r) {
+			if r.Method == http.MethodGet && r.URL.Path == "/" {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusForbidden)
+				fmt.Fprint(w, `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
+<title>CROM-AR — acesso</title><style>body{font:15px system-ui;background:#0f1116;color:#e8eaf0;
+display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.card{background:#171a21;border:1px solid #2a3040;border-radius:14px;padding:32px;max-width:440px}
+h1{font-size:18px}code{background:#0f1116;padding:2px 6px;border-radius:6px}
+a{color:#5eead4}</style></head><body><div class="card">
+<h1>🧬 CROM-AR precisa do token de acesso</h1>
+<p>Este painel é local e protegido. Abra pelo <b>atalho CROM-AR</b> na área de
+trabalho, pelo ícone na bandeija (clique → <i>Abrir painel</i>) ou rode:</p>
+<p><code>crom-ar gui</code></p>
+<p style="color:#8b93a7">O link correto contém <code>?t=&lt;token&gt;</code> —
+o token fica em <code>~/.local/share/crom-ar/token</code> (chmod 0600).</p>
+</div></body></html>`)
+				return
+			}
 			http.Error(w, "token inválido — abra pelo atalho crom-ar", http.StatusForbidden)
 			return
 		}
