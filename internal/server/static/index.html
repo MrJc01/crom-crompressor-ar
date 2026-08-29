@@ -53,6 +53,15 @@ dialog .row{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
 #progress{display:none;margin-left:auto;color:var(--acc);font-size:12px}
 .empty{padding:60px;text-align:center;color:var(--dim)}
 .empty .big{font-size:44px;margin-bottom:10px}
+#brain-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;padding:14px 16px 6px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.card .c-l{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+.card .c-v{font-size:20px;font-weight:800;margin:4px 0 2px}
+.card .c-s{color:var(--dim);font-size:11px}
+#brainsview{flex:1;overflow:auto;padding-bottom:16px}
+#brainsview .tblwrap{padding:0 16px}
+#brainsview th{position:static}
+.verd{font-size:11px;font-weight:600}
 </style>
 </head>
 <body>
@@ -67,6 +76,8 @@ dialog .row{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
 </header>
 <main>
   <nav id="sidebar">
+    <h3>Painel</h3>
+    <div class="tree-item" id="nav-brains" onclick="showBrains()"><span class="ic">🧠</span> Codebooks (economia)</div>
     <h3>Pastas</h3>
     <div id="tree"></div>
   </nav>
@@ -82,11 +93,23 @@ dialog .row{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
       <span id="breadcrumb"></span>
     </div>
     <div id="listwrap">
-      <table>
-        <thead><tr><th style="width:30px"><input type="checkbox" id="sel-all" onchange="toggleAll(this)"></th><th>Nome</th><th>Tamanho</th><th>.crom</th><th>Ratio</th><th>Hit</th><th>Importado</th><th style="width:220px">Ações</th></tr></thead>
-        <tbody id="rows"></tbody>
-      </table>
-      <div id="empty" class="empty" style="display:none"><div class="big">🗄️</div>Cofre vazio.<br>Use <b>Importar arquivos</b> ou <b>Importar pasta</b> para começar — dedup automático inclusa.</div>
+      <div id="fileview">
+        <table>
+          <thead><tr><th style="width:30px"><input type="checkbox" id="sel-all" onchange="toggleAll(this)"></th><th>Nome</th><th>Tamanho</th><th>.crom</th><th>Ratio</th><th>Hit</th><th>Importado</th><th style="width:220px">Ações</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div id="empty" class="empty" style="display:none"><div class="big">🗄️</div>Cofre vazio.<br>Use <b>Importar arquivos</b> ou <b>Importar pasta</b> para começar — dedup automático inclusa.</div>
+      </div>
+      <div id="brainsview" style="display:none">
+        <div id="brain-cards"></div>
+        <div class="tblwrap">
+          <h3 style="font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin:10px 2px 4px">Economia por codebook</h3>
+          <table>
+            <thead><tr><th>Codebook</th><th>Entradas</th><th>Únicos</th><th>Origem</th><th>.crom</th><th>Economia</th><th>Ratio</th><th>Hit médio</th><th>Custo .cromdb</th></tr></thead>
+            <tbody id="brain-rows"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
     <div id="statusbar"><span>📍 <b id="st-folder">/</b></span><span>arquivos: <b id="st-files">0</b></span><span>origem: <b id="st-orig">0</b></span><span>armazenado: <b id="st-stored">0</b></span><span>dedup poupou: <b id="st-dedup">0</b></span></div>
   </section>
@@ -115,6 +138,7 @@ dialog .row{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
 const TOKEN=new URLSearchParams(location.search).get("t")||"";
 let DATA={folders:[],entries:[]};
 let CUR="/";
+let VIEW="files";
 let LAST_EXTRACT_DIR=null;
 const sel=new Set();
 const fmtB=n=>{if(n==null)return"0 B";const u=["B","KB","MB","GB","TB"];let i=0,x=n;while(x>=1024&&i<4){x/=1024;i++}return x.toFixed(x<10&&i>0?1:0)+" "+u[i]};
@@ -122,27 +146,67 @@ const esc=s=>(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'
 function toast(m){const t=document.getElementById("toast");t.textContent=m;t.style.display="block";clearTimeout(t._h);t._h=setTimeout(()=>t.style.display="none",3500)}
 function prog(m){const p=document.getElementById("progress");p.textContent=m||"";p.style.display=m?"inline":"none"}
 async function api(path,opts={}){opts.headers=Object.assign({"X-Crom-Token":TOKEN},opts.headers||{});const r=await fetch(path,opts);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
+function setView(v){
+  VIEW=v;
+  document.getElementById("fileview").style.display=v==="files"?"block":"none";
+  document.getElementById("brainsview").style.display=v==="brains"?"block":"none";
+  document.getElementById("toolbar").style.display=v==="files"?"flex":"none";
+  document.getElementById("nav-brains").classList.toggle("sel",v==="brains");
+  document.querySelectorAll("#tree .tree-item").forEach(el=>el.classList.remove("sel"));
+  if(v==="brains")loadBrains();
+}
+function showBrains(){CUR="/";setView("brains")}
+async function loadBrains(){
+  const j=await api("/api/brains");
+  const bs=j.brains||[];
+  const total={orig:0,stored:0,saved:0};
+  bs.forEach(b=>{total.orig+=b.original;total.stored+=b.stored;total.saved+=b.saved});
+  const cards=document.getElementById("brain-cards");
+  const savedPct=total.orig?100-total.stored/total.orig*100:0;
+  cards.innerHTML=`
+    <div class="card"><div class="c-l">Economia total</div><div class="c-v ${total.saved>=0?"ok":"bad"}">${fmtB(total.saved)}</div><div class="c-s">${savedPct.toFixed(1)}% menor que a origem</div></div>
+    <div class="card"><div class="c-l">Codebooks ativos</div><div class="c-v">${bs.length}</div><div class="c-s">${bs.filter(b=>b.default).length} padrão · ${bs.filter(b=>!b.name).length} sem codebook</div></div>
+    <div class="card"><div class="c-l">Origem coberta</div><div class="c-v">${fmtB(total.orig)}</div><div class="c-s">${fmtB(total.stored)} em .crom</div></div>`;
+  const rows=document.getElementById("brain-rows");
+  if(!bs.length){rows.innerHTML='<tr><td colspan="9" class="empty">nenhuma entrada importada ainda</td></tr>';return}
+  rows.innerHTML=bs.map(b=>{
+    const nm=b.name?esc(b.name):'<span style="color:var(--dim)">— sem codebook (bypass)</span>';
+    const def=b.default?'<span class="badge">padrão</span>':"";
+    const good=b.saved>=0;
+    const verd=good?`poupou ${fmtB(b.saved)}`:`causou +${fmtB(-b.saved)}`;
+    const ratioCls=b.ratio_pct<60?"ratio-good":b.ratio_pct<95?"ratio-mid":"ratio-bad";
+    const hit=b.avg_hit?b.avg_hit.toFixed(0)+"%":"—";
+    return `<tr class="row"><td><span class="nm">🧠 ${nm}</span>${def}</td>
+      <td class="sz">${b.members}</td><td class="sz">${b.unique}</td>
+      <td class="sz">${fmtB(b.original)}</td><td class="sz">${fmtB(b.stored)}</td>
+      <td class="verd ${good?"ok":"bad"}">${verd}</td>
+      <td class="${ratioCls}">${b.ratio_pct.toFixed(1)}%</td>
+      <td class="sz">${hit}</td>
+      <td class="sz">${b.db_size?fmtB(b.db_size):"—"}</td></tr>`;
+  }).join("");
+}
 function curPrefix(){return CUR==="/"?"":"/"}
 
 async function refresh(){
   DATA=await api("/api/tree");
-  renderTree();renderRows();
+  renderTree();
   const st=await api("/api/stats");
   document.getElementById("st-files").textContent=st.files;
   document.getElementById("st-orig").textContent=fmtB(st.original);
   document.getElementById("st-stored").textContent=fmtB(st.stored);
   document.getElementById("st-dedup").textContent=fmtB(st.dedup_saved);
+  if(VIEW==="brains"){await loadBrains()}else{renderRows()}
 }
 function renderTree(){
   const t=document.getElementById("tree");t.innerHTML="";
-  const root=document.createElement("div");root.className="tree-item"+(CUR==="/"?" sel":"");
+  const root=document.createElement("div");root.className="tree-item"+(CUR==="/"&&VIEW==="files"?" sel":"");
   root.innerHTML='<span class="ic">🏠</span> Cofre';
-  root.onclick=()=>{CUR="/";refresh()};t.appendChild(root);
+  root.onclick=()=>{CUR="/";setView("files");refresh()};t.appendChild(root);
   const add=(nodes,depth)=>{for(const n of nodes){
-    const d=document.createElement("div");d.className="tree-item"+(CUR===n.path?" sel":"");
+    const d=document.createElement("div");d.className="tree-item"+(CUR===n.path&&VIEW==="files"?" sel":"");
     d.style.paddingLeft=(9+depth*14)+"px";
     d.innerHTML=`<span class="ic">📁</span> ${esc(n.name)}`;
-    d.onclick=()=>{CUR=n.path;refresh()};t.appendChild(d);
+    d.onclick=()=>{CUR=n.path;setView("files");refresh()};t.appendChild(d);
     add(n.children||[],depth+1);
   }};
   add(DATA.folders,1);

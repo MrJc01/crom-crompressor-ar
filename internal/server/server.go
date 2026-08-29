@@ -166,6 +166,7 @@ func (sv *Server) routes() http.Handler {
 	mux.HandleFunc("/", sv.home)
 	mux.HandleFunc("GET /api/tree", sv.tree)
 	mux.HandleFunc("GET /api/stats", sv.stats)
+	mux.HandleFunc("GET /api/brains", sv.brains)
 	mux.HandleFunc("POST /api/folder/create", sv.folderCreate)
 	mux.HandleFunc("POST /api/folder/rename", sv.folderRename)
 	mux.HandleFunc("POST /api/folder/delete", sv.folderDelete)
@@ -265,15 +266,21 @@ func parentNode(p string) string {
 }
 
 func (sv *Server) tree(w http.ResponseWriter, r *http.Request) {
+	// snapshots: o FUSE (mesma Store) pode importar durante o encode
 	writeJSON(w, map[string]any{
-		"folders": buildTree(sv.Store.Man.Folders),
-		"flat":    sv.Store.Man.Folders,
-		"entries": sv.Store.Man.Entries,
+		"folders": buildTree(sv.Store.FoldersSnapshot()),
+		"flat":    sv.Store.FoldersSnapshot(),
+		"entries": sv.Store.EntriesSnapshot(),
 	})
 }
 
 func (sv *Server) stats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sv.Store.ComputeStats())
+}
+
+// brains retorna a economia por codebook (o que cada um libera ou causa).
+func (sv *Server) brains(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"brains": sv.Store.ComputeBrainStats()})
 }
 
 func (sv *Server) folderCreate(w http.ResponseWriter, r *http.Request) {
@@ -554,12 +561,13 @@ func (sv *Server) train(w http.ResponseWriter, r *http.Request) {
 		req.Size = 8192
 	}
 	if req.Dir == "" {
-		if len(sv.Store.Man.Entries) == 0 {
+		entries := sv.Store.EntriesSnapshot()
+		if len(entries) == 0 {
 			fail(w, 400, fmt.Errorf("cofre vazio: informe um diretório"))
 			return
 		}
 		dirs := map[string]bool{}
-		for _, e := range sv.Store.Man.Entries {
+		for _, e := range entries {
 			d := filepath.Dir(e.SourcePath)
 			if !dirs[d] && len(dirs) < 8 {
 				dirs[d] = true
@@ -614,7 +622,7 @@ func (sv *Server) packages(w http.ResponseWriter, r *http.Request) {
 	}
 	order := []string{}
 	byGroup := map[string]*pkgInfo{}
-	for _, e := range sv.Store.Man.Entries {
+	for _, e := range sv.Store.EntriesSnapshot() {
 		g := e.Group
 		if g == "" {
 			g = e.Name
@@ -661,7 +669,7 @@ func (sv *Server) search(w http.ResponseWriter, r *http.Request) {
 	hits := []hit{}
 	scanned := 0
 	cb := sv.Store.DefaultBrainPath()
-	for _, e := range sv.Store.Man.Entries {
+	for _, e := range sv.Store.EntriesSnapshot() {
 		if scanned >= 40 {
 			break
 		}

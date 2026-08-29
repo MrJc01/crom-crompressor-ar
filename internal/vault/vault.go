@@ -49,6 +49,7 @@ type Entry struct {
 	CromSize   int64     `json:"crom_size"`
 	Codebook   string    `json:"codebook"` // "" = empacotado sem codebook
 	HitRate    float64   `json:"hit_rate"` // % de chunks que caíram no codebook
+	Mode       uint32    `json:"mode,omitempty"` // permissões (0 = 0644; exec bit preservado)
 	PackFlags  []string  `json:"pack_flags"`
 	PackedAt   time.Time `json:"packed_at"`
 	Verified   bool      `json:"verified"`
@@ -69,6 +70,51 @@ type Store struct {
 	timeNow  func() time.Time
 	mu       sync.Mutex
 	sem      chan struct{}
+	dataMu   sync.RWMutex // protege as fatias Man.Entries/Man.Folders contra leitores concorrentes (painel web)
+}
+
+// appendEntry insere entrada com proteção de leitores (painel/FUSE na mesma
+// Store desde o fix da Store compartilhada).
+func (s *Store) appendEntry(e *Entry) {
+	s.dataMu.Lock()
+	s.Man.Entries = append(s.Man.Entries, e)
+	s.dataMu.Unlock()
+}
+
+// setEntries substitui a lista inteira (remoções, migração).
+func (s *Store) setEntries(keep []*Entry) {
+	s.dataMu.Lock()
+	s.Man.Entries = keep
+	s.dataMu.Unlock()
+}
+
+// appendFolder cria pasta virtual com proteção de leitores.
+func (s *Store) appendFolder(f string) {
+	s.dataMu.Lock()
+	s.Man.Folders = append(s.Man.Folders, f)
+	s.dataMu.Unlock()
+}
+
+// setFolders substitui a lista de pastas (renames).
+func (s *Store) setFolders(folders []string) {
+	s.dataMu.Lock()
+	s.Man.Folders = folders
+	s.dataMu.Unlock()
+}
+
+// EntriesSnapshot devolve cópia da lista de entradas para leitura segura
+// fora de qualquer lock (o painel serializa JSON enquanto o FUSE importa).
+func (s *Store) EntriesSnapshot() []*Entry {
+	s.dataMu.RLock()
+	defer s.dataMu.RUnlock()
+	return append([]*Entry(nil), s.Man.Entries...)
+}
+
+// FoldersSnapshot devolve cópia da lista de pastas.
+func (s *Store) FoldersSnapshot() []string {
+	s.dataMu.RLock()
+	defer s.dataMu.RUnlock()
+	return append([]string(nil), s.Man.Folders...)
 }
 
 func (s *Store) acquire() {
@@ -180,7 +226,7 @@ func (s *Store) migrate() {
 		s.Man.Folders = clean
 		changed = true
 	}
-	kept := s.Man.Entries[:0]
+	kept := s.EntriesSnapshot()[:0]
 	for _, e := range s.Man.Entries {
 		if strings.Contains(e.Path, "/.Trash-") || strings.Contains(e.Path, "/.Trash/") {
 			changed = true
@@ -188,8 +234,8 @@ func (s *Store) migrate() {
 		}
 		kept = append(kept, e)
 	}
-	s.Man.Entries = kept
-	for _, e := range s.Man.Entries {
+	s.setEntries(kept)
+	for _, e := range s.EntriesSnapshot() {
 		if e.UID == "" {
 			e.UID = randomUID()
 			changed = true
@@ -389,6 +435,10 @@ func ResolveRoot() string {
 }
 
 // BrainNameFromPath extrai o nome do codebook a partir de um caminho.
+// Caminho vazio (bypass) devolve "" — não "." (filepath.Base de "" é ".").
 func BrainNameFromPath(p string) string {
+	if p == "" {
+		return ""
+	}
 	return strings.TrimSuffix(filepath.Base(p), ".cromdb")
 }

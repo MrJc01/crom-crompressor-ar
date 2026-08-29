@@ -20,6 +20,7 @@ type AddOptions struct {
 	NoVerify   bool   // pular verificação pós-pack
 	ForceTrain bool   // retreinar o codebook do cofre a partir da origem
 	NoBrain    bool   // expert: empacotar sem codebook (não-confiável no V24)
+	Mode       uint32 // permissões a gravar (0 = derivar do arquivo fonte)
 }
 
 // ImportResult resume a importação de um arquivo.
@@ -136,6 +137,7 @@ type AddFileOpts struct {
 	Rel    string // relPath dentro do grupo ("" = Name)
 	Group  string // grupo de pacote ("" = Name)
 	IsDir  bool   // true = membro de pacote (extract recria a árvore)
+	Mode   uint32 // permissões pedidas no Create (0 = 0644)
 	Opt    AddOptions
 }
 
@@ -156,6 +158,7 @@ func (s *Store) ImportFile(o AddFileOpts) (*Entry, error) {
 	if err := s.resolveBrain(src, &o.Opt); err != nil {
 		return nil, err
 	}
+	o.Opt.Mode = o.Mode // permissões vindas do fs (o tmp do spool é 0600)
 	target := path.Join(folder, name)
 	s.mu.Lock()
 	if old := s.entryByPathLocked(target); old != nil {
@@ -205,7 +208,7 @@ func (s *Store) addFile(src, group, rel string, isDir bool, opt AddOptions) (Imp
 		}
 		e := s.newEntry(hash, src, group, rel, isDir, size, cromName, cromSize, opt.Brain, opt)
 		e.Verified = true
-		s.Man.Entries = append(s.Man.Entries, e)
+		s.appendEntry(e)
 		msg := "dedup: .crom já no cofre"
 		if refEntry == nil {
 			msg = "dedup: conteúdo idêntico já importado"
@@ -251,18 +254,24 @@ func (s *Store) addFile(src, group, rel string, isDir bool, opt AddOptions) (Imp
 		}
 		e.Verified = true
 	}
-	s.Man.Entries = append(s.Man.Entries, e)
+	s.appendEntry(e)
 	return ImportResult{Entry: e}, nil
 }
 
 func (s *Store) newEntry(hash, src, group, rel string, isDir bool, size int64, cromName string, cromSize int64, brain string, opt AddOptions) *Entry {
 	folder := "/"
+	mode := opt.Mode
+	if mode == 0 {
+		if st, err := os.Stat(src); err == nil {
+			mode = uint32(st.Mode().Perm())
+		}
+	}
 	return &Entry{
 		UID: randomUID(),
 		ID: hash, Name: filepath.Base(rel), Group: group, RelPath: rel, Folder: folder,
 		Path: canonicalPath(folder, rel), IsDir: isDir,
 		SourcePath: src, Size: size, CromFile: cromName, CromSize: cromSize,
-		Codebook: brain, PackFlags: opt.PackFlagsList(), PackedAt: s.timeNow(),
+		Codebook: brain, HitRate: 0, Mode: mode, PackFlags: opt.PackFlagsList(), PackedAt: s.timeNow(),
 	}
 }
 
@@ -460,6 +469,9 @@ func (s *Store) Extract(entries []*Entry, opt ExtractOptions) ([]ExtractResult, 
 			results = append(results, res)
 			continue
 		}
+		if e.Mode&0o111 != 0 {
+			_ = os.Chmod(target, os.FileMode(e.Mode))
+		}
 		res.Ok = true
 		results = append(results, res)
 	}
@@ -485,8 +497,8 @@ func (s *Store) removeLocked(entries []*Entry) (int, error) {
 		}
 		keep = append(keep, e)
 	}
-	removedN := len(s.Man.Entries) - len(keep)
-	s.Man.Entries = keep
+	removedN := len(s.EntriesSnapshot()) - len(keep)
+	s.setEntries(keep)
 
 	// apaga .crom órfãos
 	refs := map[string]int{}
@@ -520,7 +532,7 @@ func (s *Store) ComputeStats() Stats {
 	st := Stats{}
 	perContent := map[string]bool{}
 	cromFiles := map[string]bool{}
-	for _, e := range s.Man.Entries {
+	for _, e := range s.EntriesSnapshot() {
 		st.Files++
 		st.Original += e.Size
 		if perContent[e.ID] {
@@ -547,7 +559,7 @@ func (s *Store) ComputeStats() Stats {
 	}
 	var ratioSum float64
 	var ratioN int
-	for _, e := range s.Man.Entries {
+	for _, e := range s.EntriesSnapshot() {
 		if e.Size > 0 {
 			ratioSum += float64(e.CromSize) / float64(e.Size) * 100
 			ratioN++

@@ -360,7 +360,7 @@ func (v *VaultFS) GetAttr(name string, ctx *fuse.Context) (*fuse.Attr, fuse.Stat
 		return out, fuse.OK
 	}
 	if e != nil {
-		out.Mode = fuse.S_IFREG | 0o644
+		out.Mode = fuse.S_IFREG | fileModePerm(e.Mode)
 		out.Size = uint64(e.Size)
 		out.Nlink = 1
 		out.Atime = uint64(e.PackedAt.Unix())
@@ -369,7 +369,11 @@ func (v *VaultFS) GetAttr(name string, ctx *fuse.Context) (*fuse.Attr, fuse.Stat
 		return out, fuse.OK
 	}
 	if p := v.getPending(name); p != nil && !p.orphan {
-		out.Mode = fuse.S_IFREG | 0o644
+		pm := uint32(0)
+		if p.opts != nil {
+			pm = p.opts.Mode
+		}
+		out.Mode = fuse.S_IFREG | fileModePerm(pm)
 		out.Size = uint64(p.size)
 		out.Nlink = 1
 		out.Atime = uint64(p.mtime.Unix())
@@ -378,6 +382,15 @@ func (v *VaultFS) GetAttr(name string, ctx *fuse.Context) (*fuse.Attr, fuse.Stat
 		return out, fuse.OK
 	}
 	return nil, fuse.ENOENT
+}
+
+// fileModePerm traduz o modo persistido da entrada em modo de exibição
+// no FUSE: com exec bit → 0755 (app executável direto do cofre).
+func fileModePerm(mode uint32) uint32 {
+	if mode&0o111 != 0 {
+		return 0o755
+	}
+	return 0o644
 }
 
 // cromFile é um arquivo aberto: leitura do spool, escrita em tmp (dirty) e
@@ -531,10 +544,26 @@ func (v *VaultFS) Create(name string, flags uint32, mode uint32, ctx *fuse.Conte
 	if err != nil {
 		return nil, fuse.EIO
 	}
-	v.registerPending(name, tmp.Name(), v.buildImportOpts(name, nil))
+	opts := v.buildImportOpts(name, nil)
+	opts.Mode = mode & 0o777 // preserva exec bit (ex.: apps rodam direto do cofre)
+	v.registerPending(name, tmp.Name(), opts)
 	// novo arquivo precisa ser importado no close mesmo sem writes (0-byte válido)
 	c := &cromFile{File: nodefs.NewDefaultFile(), fs: v, name: name, tmp: tmp.Name(), f: tmp, dirty: true}
 	return &nodefs.WithFlags{File: c, FuseFlags: fuse.FOPEN_KEEP_CACHE, Description: "crom-ar"}, fuse.OK
+}
+
+// Chmod atualiza o modo persistido da entrada (permite chmod +x na montagem).
+func (v *VaultFS) Chmod(name string, mode uint32, ctx *fuse.Context) fuse.Status {
+	name = cleanPath(name)
+	if err := v.st.SetEntryMode(name, mode); err != nil {
+		return fuse.ENOENT
+	}
+	return fuse.OK
+}
+
+// Utimens aceita e ignora (o mtime exibido é o do import no cofre).
+func (v *VaultFS) Utimens(name string, a *time.Time, m *time.Time, ctx *fuse.Context) fuse.Status {
+	return fuse.OK
 }
 
 // Truncate aplica truncamento persistente (arquivo fechado).
@@ -767,8 +796,27 @@ func (v *VaultFS) OpenDir(name string, ctx *fuse.Context) ([]fuse.DirEntry, fuse
 	return out, fuse.OK
 }
 
-// Access: dono tem acesso total (o cofre é do usuário que montou).
+// Access respeita os bits de modo: R/W liberados para o dono (o cofre é do
+// usuário que montou), X_OK só quando a entrada tem exec bit. Responder OK
+// incondicionalmente enganava ferramentas que usam access(2) (bash -x,
+// test -x) e apps que sondam permissão antes de executar.
 func (v *VaultFS) Access(name string, mode uint32, ctx *fuse.Context) fuse.Status {
+	name = cleanPath(name)
+	dir, e := v.lookup(name)
+	perm := uint32(0o755) // diretórios
+	if !dir {
+		if e != nil {
+			perm = fileModePerm(e.Mode)
+		} else {
+			perm = 0o644 // pendente/ideal desconhecido
+		}
+	}
+	if ctx == nil || ctx.Owner.Uid != uint32(os.Getuid()) {
+		return fuse.EACCES
+	}
+	if mode&1 != 0 && perm&0o111 == 0 { // X_OK sem exec bit
+		return fuse.EACCES
+	}
 	return fuse.OK
 }
 
@@ -794,22 +842,31 @@ var _ pathfs.FileSystem = (*VaultFS)(nil)
 
 // MountServer cria o servidor FUSE do cofre (não serve; use srv.Serve()).
 // Reusado pelo comando fuse e pelo tray.
-func MountServer(mountpoint, root, brain string, noVerify bool) (*fuse.Server, *vault.Store, error) {
+// MountServerStore monta usando uma Store já carregada pelo chamador —
+// uma única memória de manifest por processo (o tray serve o painel web e
+// o FUSE com o MESMO estado; sem isso o painel diverge do que o FUSE grava
+// e uma ação do painel pode sobrescrever entradas importadas pela montagem).
+func MountServerStore(mountpoint string, st *vault.Store, brain string, noVerify bool) (*fuse.Server, *vault.Store, error) {
 	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
 		return nil, nil, err
 	}
-	s, err := vault.LoadStore(root)
-	if err != nil {
-		return nil, nil, err
-	}
-	vfs := New(s, Options{Brain: brain, NoVerify: noVerify})
+	vfs := New(st, Options{Brain: brain, NoVerify: noVerify})
 	nodeFs := pathfs.NewPathNodeFs(vfs, nil)
 	conn := nodefs.NewFileSystemConnector(nodeFs.Root(), &nodefs.Options{})
 	srv, err := fuse.NewServer(conn.RawFS(), mountpoint, MountOptions())
 	if err != nil {
 		return nil, nil, fmt.Errorf("montagem falhou (fuse3 instalado?): %v", err)
 	}
-	return srv, s, nil
+	return srv, st, nil
+}
+
+// MountServer carrega a Store do root informado e monta.
+func MountServer(mountpoint, root, brain string, noVerify bool) (*fuse.Server, *vault.Store, error) {
+	s, err := vault.LoadStore(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	return MountServerStore(mountpoint, s, brain, noVerify)
 }
 
 // MountLoopbackRO monta um diretório como FUSE somente-leitura

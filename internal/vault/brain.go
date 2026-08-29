@@ -18,6 +18,78 @@ type Brain struct {
 	Default bool   `json:"default"`
 }
 
+// BrainStat resume a economia que um codebook está liberando (ou causando)
+// sobre as entradas que foram empacotadas com ele.
+type BrainStat struct {
+	Name     string  `json:"name"`      // "" = empacotado sem codebook (bypass)
+	Default  bool    `json:"default"`   // é o codebook padrão do cofre
+	DBSize   int64   `json:"db_size"`   // custo do .cromdb em disco
+	Members  int64   `json:"members"`   // entradas lógicas
+	Unique   int64   `json:"unique"`    // conteúdos únicos (.crom próprios)
+	Original int64   `json:"original"`  // bytes de origem (visão lógica, dedup incluso)
+	Stored   int64   `json:"stored"`    // bytes .crom (conteúdos únicos)
+	Saved    int64   `json:"saved"`     // original - stored (negativo = causando overhead)
+	Ratio    float64 `json:"ratio_pct"` // stored/original
+	AvgHit   float64 `json:"avg_hit"`   // hit rate médio dos chunks
+}
+
+// ComputeBrainStats agrega a economia por codebook a partir do manifest.
+// O armazenado conta cada .crom uma única vez (um .crom pertence a exatamente
+// um codebook — aquele usado no pack), então as linhas somam aos totais globais.
+func (s *Store) ComputeBrainStats() []BrainStat {
+	def := s.DefaultBrainName()
+	dbSize := map[string]int64{}
+	for _, b := range s.ListBrains() {
+		dbSize[b.Name] = b.Size
+	}
+	order := []string{}
+	byName := map[string]*BrainStat{}
+	entries := s.EntriesSnapshot()
+	get := func(name string) *BrainStat {
+		if bs := byName[name]; bs != nil {
+			return bs
+		}
+		bs := &BrainStat{Name: name, Default: name != "" && name == def, DBSize: dbSize[name]}
+		byName[name] = bs
+		order = append(order, name)
+		return bs
+	}
+	seen := map[string]bool{}
+	for _, e := range entries {
+		bs := get(BrainNameFromPath(e.Codebook))
+		bs.Members++
+		bs.Original += e.Size
+		bs.AvgHit += e.HitRate
+		if !seen[e.CromFile] {
+			seen[e.CromFile] = true
+			bs.Stored += e.CromSize
+			bs.Unique++
+		}
+	}
+	out := make([]BrainStat, 0, len(order))
+	for _, name := range order {
+		bs := byName[name]
+		bs.Saved = bs.Original - bs.Stored
+		if bs.Original > 0 {
+			bs.Ratio = float64(bs.Stored) / float64(bs.Original) * 100
+		}
+		if bs.Members > 0 {
+			bs.AvgHit /= float64(bs.Members)
+		}
+		out = append(out, *bs)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Default != out[j].Default {
+			return out[i].Default
+		}
+		if out[i].Saved != out[j].Saved {
+			return out[i].Saved > out[j].Saved
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
 // ListBrains lista os codebooks do cofre.
 func (s *Store) ListBrains() []Brain {
 	var out []Brain
@@ -84,7 +156,9 @@ func (s *Store) UseBrain(name string) error {
 	return s.Save()
 }
 
-// RemoveBrain apaga um codebook (recusa o padrão em uso).
+// RemoveBrain apaga um codebook (recusa o padrão em uso e qualquer
+// codebook que ainda tenha entradas empacotadas com ele — sem ele o
+// unpack dessas entradas quebraria).
 func (s *Store) RemoveBrain(name string) error {
 	name = strings.TrimSuffix(name, ".cromdb")
 	if name == s.DefaultBrainName() {
@@ -93,7 +167,21 @@ func (s *Store) RemoveBrain(name string) error {
 	if !s.BrainExists(name) {
 		return fmt.Errorf("codebook não encontrado: %s", name)
 	}
+	if n := s.brainRefCount(name); n > 0 {
+		return fmt.Errorf("%s é usado por %d entrada(s) — remova-as (crom-ar rm) ou repack antes de apagar o codebook", name, n)
+	}
 	return os.Remove(s.BrainPath(name))
+}
+
+// brainRefCount conta entradas empacotadas com o codebook informado.
+func (s *Store) brainRefCount(name string) int {
+	n := 0
+	for _, e := range s.EntriesSnapshot() {
+		if BrainNameFromPath(e.Codebook) == name {
+			n++
+		}
+	}
+	return n
 }
 
 // ExportBrain copia um codebook para fora do cofre (compartilhamento).

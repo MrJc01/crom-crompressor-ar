@@ -532,6 +532,7 @@ func cmdTray(args []string) error {
 	_ = fs.String("root", rootDir(), "raiz do cofre")
 	noWeb := fs.Bool("no-web", false, "inicia com o painel web desligado")
 	noAuto := fs.Bool("no-automount", false, "não monta o cofre ao iniciar")
+	web := fs.String("web-addr", "", "endereço do painel web (padrão: 127.0.0.1:8619)")
 	if _, err := parseFlex(fs, args); err != nil {
 		return err
 	}
@@ -562,6 +563,7 @@ func cmdTray(args []string) error {
 	return tray.Run(s, tray.Options{
 		Mountpoint:  mountpoint,
 		Root:        s.Cfg.Root,
+		WebAddr:     *web,
 		NoWeb:       *noWeb,
 		NoAutoMount: *noAuto,
 	})
@@ -1019,7 +1021,7 @@ func cmdAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	if fs.NArg() == 0 {
+	if len(pos) == 0 {
 		return fmt.Errorf("informe o caminho para importar")
 	}
 	s, err := openStore()

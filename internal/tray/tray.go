@@ -54,10 +54,8 @@ type App struct {
 // Run executa o app de bandeija (bloqueia até Sair).
 // SIGTERM (systemd stop) desmonta com elegância antes de encerrar.
 func Run(st *vault.Store, opt Options) error {
+	opt = normalizeOptions(opt)
 	app := &App{st: st, opt: opt}
-	if opt.WebAddr == "" {
-		opt.WebAddr = "127.0.0.1:8619"
-	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
 	go func() {
@@ -70,6 +68,16 @@ func Run(st *vault.Store, opt Options) error {
 	}()
 	systray.Run(app.onReady, app.onExit)
 	return nil
+}
+
+// normalizeOptions aplica os defaults ANTES de as opções serem copiadas
+// para dentro do App — fazer depois do `&App{opt: opt}` deixa o campo vazio
+// e o "Abrir painel (navegador)" monta URL sem host (regressão testada).
+func normalizeOptions(opt Options) Options {
+	if opt.WebAddr == "" {
+		opt.WebAddr = "127.0.0.1:8619"
+	}
+	return opt
 }
 
 func (a *App) onReady() {
@@ -156,7 +164,7 @@ func (a *App) mount() {
 	if fusefs.IsMountedHealthy(a.opt.Mountpoint) {
 		return
 	}
-	srv, _, err := fusefs.MountServer(a.opt.Mountpoint, a.st.Cfg.Root, "", false)
+	srv, _, err := fusefs.MountServerStore(a.opt.Mountpoint, a.st, "", false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "! montagem falhou: %v\n", err)
 		return

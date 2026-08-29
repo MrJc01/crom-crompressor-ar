@@ -35,6 +35,19 @@ func (s *Store) entryByPathLocked(p string) *Entry {
 	return nil
 }
 
+// SetEntryMode atualiza as permissões persistidas da entrada (chmod no FUSE,
+// ex.: chmod +x para executar apps direto do cofre).
+func (s *Store) SetEntryMode(p string, mode uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.entryByPathLocked(p)
+	if e == nil {
+		return fmt.Errorf("entrada não encontrada: %s", p)
+	}
+	e.Mode = mode & 0o777
+	return s.Save()
+}
+
 // RenameEntry move/renomeia a entrada para um novo caminho canônico.
 // Movendo para dentro/fora de /arquivos ajusta o grupo (pacote).
 func (s *Store) RenameEntry(oldPath, newPath string) error {
@@ -136,7 +149,7 @@ func (s *Store) CreateFolder(p string) error {
 	for _, part := range parts {
 		cur += "/" + part
 		if !s.hasFolder(cur) {
-			s.Man.Folders = append(s.Man.Folders, cur)
+			s.appendFolder(cur)
 		}
 	}
 	return s.Save()
@@ -172,7 +185,7 @@ func (s *Store) RenameFolder(old, newName string) error {
 			newList = append(newList, f)
 		}
 	}
-	s.Man.Folders = dedupeFolders(newList)
+	s.setFolders(dedupeFolders(newList))
 	for _, e := range s.Man.Entries {
 		if e.Folder == old {
 			e.Folder = dst
@@ -218,7 +231,7 @@ func (s *Store) DeleteFolder(p string) error {
 			keep = append(keep, f)
 		}
 	}
-	s.Man.Folders = keep
+	s.setFolders(keep)
 	return s.Save()
 }
 
