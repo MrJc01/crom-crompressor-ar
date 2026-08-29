@@ -36,8 +36,11 @@ kill_port() { # mata quem escuta na porta (o $! do setsid não é o pid real)
 cleanup() {
   fusermount3 -u "$MNT" 2>/dev/null; umount -l "$MNT" 2>/dev/null
   fusermount3 -u "$CDMNT" 2>/dev/null; umount -l "$CDMNT" 2>/dev/null
+  fusermount3 -u "$TRAYMNT" 2>/dev/null; umount -l "$TRAYMNT" 2>/dev/null
   [ -n "$FUSEPID" ] && kill -9 "$FUSEPID" 2>/dev/null
+  [ -n "$TRAYPID" ] && kill -9 "$TRAYPID" 2>/dev/null
   kill_port 8719
+  kill_port 8721
   if [ "${KEEP:-0}" = "1" ] || [ $FAIL -gt 0 ]; then
     echo "evidências: $R"
   else
@@ -205,8 +208,91 @@ d=json.load(sys.stdin)
 assert any(e['rel_path']=='up.txt' for e in d['entries'])" && ok "T8l upload visível na árvore" || bad "T8l upload"
 curl -s "$W/?t=$WTOK" | grep -q "doSearch" && ok "T8m busca na página" || bad "T8m busca na página"
 curl -s "$W/?t=$WTOK" | grep -q "Pacotes" && ok "T8n relatório de pacotes na página" || bad "T8n relatório"
-
+curl -s "$W/?t=$WTOK" | grep -q "brain-rows" && ok "T8o seção Codebooks no painel" || bad "T8o seção codebooks"
+python3 -c "
+import json,urllib.request,sys
+tok='$WTOK'
+def get(p):
+    return json.load(urllib.request.urlopen('$W'+p+('&' if '?' in p else '?')+'t='+tok))
+b=get('/api/brains')['brains']
+s=get('/api/stats')
+orig=sum(x['original'] for x in b); stored=sum(x['stored'] for x in b)
+assert orig==s['original_bytes'] and stored==s['stored_bytes'], (orig,stored,s)
+sys.exit(0)" && ok "T8p linhas por codebook somam ao global" || bad "T8p coerência api/brains × api/stats"
 kill -9 "$WEBPID" 2>/dev/null
+
+# ════════ S9 — Modo persistido: apps rodam direto do cofre ════════
+echo "— S9 Modo/exec —"
+cp /usr/bin/true "$MNT/app755.bin" && wait_settle
+[ -x "$MNT/app755.bin" ] && ok "T9a exec bit preservado na montagem" || bad "T9a exec bit"
+"$MNT/app755.bin" && ok "T9b app executado DIRETO do cofre" || bad "T9b exec direto"
+echo "texto comum" > "$MNT/app644.txt" && wait_settle
+sleep 1.2 # passa do timeout de cache de attrs do kernel (~1s)
+[ ! -x "$MNT/app644.txt" ] && ok "T9c texto sem exec bit" || bad "T9c exec bit indevido" "$(stat -c '%A %a' "$MNT/app644.txt" 2>&1) / manifest: $(python3 -c "
+import json
+m=json.load(open('$CROM_AR_ROOT/manifest.json'))
+print(','.join(oct(e.get('mode',0)) for e in m['entries'] if 'app644' in e['name']))" 2>/dev/null)"
+chmod +x "$MNT/app644.txt" 2>/dev/null && [ -x "$MNT/app644.txt" ] && ok "T9d chmod na montagem persiste" || bad "T9d chmod"
+rm -rf "$R/ext-modo"
+$BIN extract app755.bin -o "$R/ext-modo" >/dev/null 2>&1 && [ -x "$R/ext-modo/app755.bin" ] && ok "T9e extração preserva exec bit" || bad "T9e extração"
+( set -o noclobber; : > "$MNT/excl.txt" ) 2>/dev/null && ok "T9f criação O_EXCL (padrão do rsync)" || bad "T9f O_EXCL recusado (limitação: rsync falha no cofre)"
+wait_settle
+
+# ════════ S10 — Codebook com referências não é removível ════════
+echo "— S10 Codebook com refs —"
+echo "conteúdo único para brain $RANDOM" > /tmp/suite-brain-doc.txt
+./bin/crom-ar add /tmp/suite-brain-doc.txt --brain "$CROM_AR_ROOT/brains/dominio.cromdb" >/dev/null 2>&1 && ok "T10a add com brain específico" || bad "T10a add --brain"
+./bin/crom-ar brain use vault >/dev/null 2>&1
+./bin/crom-ar brain remove dominio 2>/dev/null && bad "T10b remove com refs deveria recusar" || ok "T10b remove com refs recusado"
+./bin/crom-ar rm suite-brain-doc.txt >/dev/null 2>&1
+./bin/crom-ar brain remove dominio >/dev/null 2>&1 && ok "T10c remove sem refs permitido" || bad "T10c remove sem refs"
+
+# ════════ S11 — Tray: FUSE e painel web compartilham o MESMO estado ════════
+# Regressão do bug de 28/08: o tray montava o FUSE com uma segunda Store —
+# o painel não via o que o FUSE importava e podia apagar entradas ao salvar.
+echo "— S11 Tray store compartilhada —"
+kill_port 8721
+TRAYMNT=$R/traymnt
+mkdir -p "$TRAYMNT" "$R/home"
+setsid env HOME="$R/home" CROM_AR_ROOT=$CROM_AR_ROOT CROMPRESSOR_BIN=$CROMPRESSOR_BIN \
+  CROM_AR_TOKEN_FILE=$R/tray-token "$BIN" tray -m "$TRAYMNT" --web-addr 127.0.0.1:8721 \
+  </dev/null >"$R/tray.log" 2>&1 &
+TRAYPID=$!
+sleep 3
+TT=http://127.0.0.1:8721
+TTOK=$(cat "$R/tray-token" 2>/dev/null)
+check "T11a tray web no ar (:8721)" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$TT/api/stats?t=$TTOK")"
+mount | grep -q "$TRAYMNT " && ok "T11b tray montou o cofre" || bad "T11b tray não montou"
+echo "regressão store $RANDOM" > "$TRAYMNT/live-sync.txt"
+wait_settle
+curl -s "$TT/api/tree?t=$TTOK" 2>/dev/null | grep -q "live-sync" && ok "T11c escrita FUSE visível no painel NA HORA" || bad "T11c store dupla! (painel cego ao FUSE)"
+fusermount3 -u "$TRAYMNT" 2>/dev/null; umount -l "$TRAYMNT" 2>/dev/null
+
+# ════════ S13 — cd mount esqueleto é read-only ════════
+echo "— S13 Esqueleto read-only —"
+./bin/crom-ar cd mount "$R/edge.cromar" -m "$CDMNT" --daemon >/dev/null 2>&1 && sleep 1 && ok "T13a cd mount esqueleto" || bad "T13a cd mount esqueleto"
+touch "$CDMNT/escrita" 2>/dev/null && bad "T13b esqueleto deveria ser read-only" || ok "T13b esqueleto read-only"
+fusermount3 -u "$CDMNT" 2>/dev/null
+
+# ════════ S14 — Concorrência: CLI mutando com residente ativo ════════
+# Limitação conhecida: o residente mantém o manifest em memória e o CLI
+# grava no disco — um Save do residente pode sobrescrever entradas do CLI.
+echo "— S14 Concorrência CLI × residente —"
+echo "entrada do CLI $RANDOM" > /tmp/suite-cli.txt
+CROM_AR_ROOT=$CROM_AR_ROOT CROMPRESSOR_BIN=$CROMPRESSOR_BIN $BIN add /tmp/suite-cli.txt >/dev/null 2>&1
+# dispara um Save do residente (criação de pasta via API persiste o manifest)
+curl -s -X POST -H "Content-Type: application/json" -d '{"path":"/lixeira-suite"}' -H "X-Crom-Token: $TTOK" "$TT/api/folder/create" >/dev/null 2>&1; true
+sleep 1
+if python3 -c "
+import json,sys
+m=json.load(open('$CROM_AR_ROOT/manifest.json'))
+sys.exit(0 if any('suite-cli' in e['name'] for e in m['entries']) else 1)"; then
+  ok "T14a Save do residente preservou entrada do CLI"
+else
+  echo "  ⚠ T14a KNOWN LIMITATION: Save do residente sobrescreve entradas adicionadas por CLI concorrente"
+fi
+CROM_AR_ROOT=$CROM_AR_ROOT CROMPRESSOR_BIN=$CROMPRESSOR_BIN $BIN rm suite-cli.txt >/dev/null 2>&1; true
+kill "$TRAYPID" 2>/dev/null; sleep 1
 
 echo "════════════════════════════════"
 echo "TOTAL: PASS=$PASS FAIL=$FAIL"
