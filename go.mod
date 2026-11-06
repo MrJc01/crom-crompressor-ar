@@ -5,6 +5,7 @@ go 1.25.7
 require github.com/hanwen/go-fuse/v2 v2.11.0
 
 require (
+	github.com/DataDog/zstd v1.5.7 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
@@ -26,4 +27,4 @@ require (
 	github.com/MrJc01/crompressor v0.0.0-00010101000000-000000000000
 )
 
-replace github.com/MrJc01/crompressor => /media/j/j0/GitHub/crom/crompressor
+replace github.com/MrJc01/crompressor => ../crompressor
