@@ -76,10 +76,22 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 36. [ ] Durabilidade: `kill -9` no import e no GC, depois `doctor` limpo e SHA-256 ok.
 
 *Novos itens (06/11)*
-37. [ ] `fsync` em lote no `add` de pasta (hoje 3–4 fsync por arquivo; em disco ocupado, o import de 95 MB levou 64 s com 5 s de CPU).
+37. [x] `fsync` em lote no `add` de pasta: um sync por lote e frames juntando arquivos — commit `cd6077c`.
 38. [ ] Blocos **parecidos** ("hash + diferença"): comprimir o bloco novo usando o parecido como dicionário. Fecharia a diferença para o tar+zstd --long nas versões (11,15 MB vs 7,53 MB).
 39. [ ] Criptografia no depósito (hoje `--encrypt` cai no formato `.crom`).
 40. [ ] Atualizar `tests/suite.sh` para o depósito e rodar num terminal do sistema; as 27 falhas daqui são todas de FUSE (66 ✔ / 27 ✘, igual antes e depois).
+
+*Pedidos de 06/11: "ganhar através de volume", "e apagar?", "testa com 5 GB, depois 10 GB; tenho pouca memória"*
+41. [x] Arquivos pequenos: receitas num log só (`recipes.log`) e manifest comprimido (`manifest.json.zst`, migra o antigo sozinho). Dois projetos reais (201,8 MB): cofre 138,3 → 104,3 MB (1,94×), melhor que o zip (1,73×) — commit `4731856`.
+42. [x] Menos RAM: zstd com no máximo 4 workers e modo de pouca memória. Pico do `add` ~1,2 GB → ~450 MB — commit `4731856`.
+43. [x] Apagar rápido: `rm` remove as receitas num append só e o GC copia frames quase vivos sem recomprimir. `rm` de um projeto: 43 s → 7,1 s (114 MB de RAM) — commit `4731856`.
+44. [x] Corrida no FUSE entre `Release` e o faxineiro (flags atômicas, `-race` limpo) — commit `4731856`.
+45. [x] Teste de volume com 4,8 GB (7 projetos reais): cofre 2,12× (2258 MB) × zip 1,70× × 7z por projeto 2,38× × tar.zst único 2,23×. Apagar 1,4 GB: 6,6 s (7z: 164 s). Detalhes em `tests/BENCH.md`.
+49. [ ] `extract` de um arquivo de 1 MB levou 8,8 s num cofre de 2,2 GB: abrir não pode depender do tamanho do cofre.
+50. [ ] RAM de pico cresce com o cofre (1,2 GB com 2,2 GB de cofre): resolver com o item 9 (índice fora da RAM) antes do teste de 10 GB.
+46. [ ] Teste de volume com 10 GB (depois do de 5 GB, pedido do usuário).
+47. [ ] Fechar a diferença para o 7z/LZMA: codec mais forte por frame (zstd -19/níveis altos em frames frios, ou xz) e o item 38 (blocos parecidos).
+48. [ ] Dois projetos com o mesmo caminho relativo colidem na visão normal (pastas de grupo): decidir como mostrar.
 
 **Futuro (só anotado)**
 - Vídeo entre arquivos diferentes: só com quadros decodificados (pendência do motor). Hoje o ganho em vídeo vem de cópias e trechos idênticos.
@@ -88,7 +100,7 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 ## ▶️ Retomar
 
 1. Feito até aqui: fases 0, 1 e 2 e a leitura sob demanda (fase 3), na branch `deposito-blocos`.
-2. Próximo: rodar `tests/suite.sh` num terminal do sistema (FUSE), depois a migração do cofre real (item 26), e então os itens 37, 18 e 9.
+2. Próximo: itens 49 e 50 (abrir rápido, RAM com índice fora da memória), depois o teste de 10 GB (46) e o codec mais forte (47). Em seguida `tests/suite.sh` num terminal do sistema (FUSE), a migração do cofre real (item 26) e os itens 18 e 9.
 3. Dados de teste: `tests/bench_real.sh` vai baixá-los. Os desta sessão estavam no scratchpad e não ficam.
 4. FUSE só testa num terminal do sistema, fora do app Claude (`fusermount3: Operation not permitted`).
 5. O residente real está montado em `~/CromAr` (cofre em `~/Documentos/CromAr`): testes sempre com `CROM_AR_ROOT` temporário.

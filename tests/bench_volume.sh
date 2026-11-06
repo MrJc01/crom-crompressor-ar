@@ -53,10 +53,11 @@ for p in $PROJETOS; do
   t1=$(agora); rss=$(rss_mb)
   cur=$(du_b "$CROM_AR_ROOT")
   # comparação: um arquivo compactado por projeto (como se faz no dia a dia)
-  (cd "$ORIGEM" && zip -q -r -9 -y "$TRAB/p.zip" "$p")
+  # zip sai com 18 e 7z com 1 quando há arquivo sem permissão de leitura (aviso)
+  (cd "$ORIGEM" && zip -q -r -9 -y "$TRAB/p.zip" "$p" 2>/dev/null) || [ $? -eq 18 ]
   z=$(stat -c %s "$TRAB/p.zip"); rm -f "$TRAB/p.zip"
   t7=$(agora)
-  (cd "$ORIGEM" && 7z a -bd -bso0 -mx=9 -ms=on -mmt=2 -snl "$TRAB/$p.7z" "$p" >/dev/null)
+  (cd "$ORIGEM" && 7z a -bd -bso0 -mx=9 -ms=on -mmt=2 -snl "$TRAB/$p.7z" "$p" >/dev/null 2>&1) || [ $? -eq 1 ]
   t7b=$(agora)
   s7=$(stat -c %s "$TRAB/$p.7z")
   [ "$p" = "$APAGAR" ] && echo "$(dt "$t7" "$t7b")" >"$TRAB/.t7-$p" || rm -f "$TRAB/$p.7z"
@@ -67,7 +68,7 @@ done
 
 echo ">> tar + zstd -19 --long=27 de tudo junto"
 t0=$(agora)
-tzst=$( (cd "$ORIGEM" && tar cf - $PROJETOS 2>/dev/null) | zstd -q -19 --long=27 -T2 -c | wc -c)
+tzst=$( (cd "$ORIGEM" && tar cf - $PROJETOS 2>/dev/null || true) | zstd -q -19 --long=27 -T2 -c | wc -c)
 t1=$(agora)
 cofre=$(du_b "$CROM_AR_ROOT")
 {

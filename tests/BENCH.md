@@ -30,3 +30,61 @@ Tempo de import: em CPU, ~50 MB/s nos bancos e ~6 MB/s em textos pequenos
 
 Reproduzir: `tests/bench_real.sh` (baixa os dados para `~/.cache/crom-ar-bench`;
 vídeos com `VIDEOS=/pasta CONJUNTOS="livros bancos versoes videos"`).
+
+## 06/11/2026 — volume: 7 projetos reais, 4,8 GB (`tests/bench_volume.sh`)
+
+Projetos de `~/Documentos/GitHub` (código, worktrees, node_modules, vídeos e
+imagens de animação), todos no mesmo cofre. Comparação: um zip/7z por projeto
+(como se guarda no dia a dia) e um tar.zst único de tudo junto.
+
+### Crescimento do cofre a cada projeto
+
+| projeto | original | arquivos | cofre acumulado | cofre +projeto | tempo | RAM pico | zip -9 | 7z -mx9 sólido |
+|---|---|---|---|---|---|---|---|---|
+| opencorp | 901.3 MB | 64222 | **133.4 MB** | +133.4 MB | 92.0 s | 774 MB | 296.1 MB | 135.8 MB |
+| opencorp-claude | 1104.9 MB | 37253 | **353.0 MB** | +219.6 MB | 70.8 s | 876 MB | 395.4 MB | 224.3 MB |
+| crom-animate-agent | 940.1 MB | 7954 | **949.7 MB** | +596.7 MB | 29.2 s | 841 MB | 615.0 MB | 534.2 MB |
+| crom-animate-studio-scratch | 1388.6 MB | 11647 | **1969.7 MB** | +1020.1 MB | 45.2 s | 1014 MB | 1180.5 MB | 857.0 MB |
+| crompressor | 256.7 MB | 512 | **2177.9 MB** | +208.2 MB | 10.3 s | 886 MB | 213.7 MB | 192.1 MB |
+| crompressor-stream | 51.1 MB | 19076 | **2232.0 MB** | +54.1 MB | 9.9 s | 1201 MB | 56.0 MB | 41.5 MB |
+| crom-animacoes | 150.6 MB | 3080 | **2258.1 MB** | +26.0 MB | 5.5 s | 1199 MB | 60.9 MB | 31.4 MB |
+| **total** | **4793.4 MB** | | **2258.1 MB** | | | | 2817.5 MB | 2016.4 MB |
+
+tar + zstd -19 --long=27 de tudo num arquivo só: **2148.9 MB** (1545.3 s).
+
+Razão (original ÷ armazenado): cofre 2.12×, zip 1.70×, 7z por projeto 2.38×, tar.zst único 2.23×.
+
+```
+  DISCO REAL:         2.2 GB  (47.1% da origem, economia de 2.5 GB)
+    depósito blocos:  2.2 GB
+```
+
+### Abrir um arquivo de 1.0 MB de dentro de `crom-animate-studio-scratch`
+
+| | tempo |
+|---|---|
+| cofre (`crom-ar extract`) | 8.8 s |
+| 7z sólido (`7z e` de um arquivo) | 39.0 s |
+
+### Apagar o projeto `crom-animate-studio-scratch` do cofre
+
+| | cofre | tempo | RAM pico |
+|---|---|---|---|
+| antes | 2258.1 MB | | |
+| `crom-ar rm` (GC automático) | 1238.7 MB (−1019.4 MB) | 6.6 s | 617 MB |
+| `crom-ar doctor --prune` | 1238.7 MB (−1019.4 MB no total) | 1.1 s | |
+
+Para comparar: `7z d` dos .json de dentro do .7z sólido desse projeto (857.0 → 866.2 MB) levou 163.8 s (o 7z regrava o arquivo).
+
+**Leitura:**
+- Cofre 2,12× contra zip 1,70×: 560 MB a menos. Projetos com muita repetição
+  (worktrees, node_modules) empatam ou ganham do 7z sólido pela dedup entre
+  projetos (opencorp 133 vs 136 MB; crom-animacoes +26 vs 31 MB).
+- Perde ~12% para o 7z por projeto, quase tudo nos projetos de mídia/JSON
+  grande (LZMA comprime mais que o zstd por frame). Ver CHECKLIST item 47.
+- Apagar um projeto de 1,4 GB: 6,6 s e libera 1 GB na hora; no 7z, apagar só
+  os .json regrava o arquivo (164 s) e ele até cresce.
+- Pendências vistas aqui: RAM de pico cresce com o cofre (índice inteiro em
+  memória, 1,2 GB com 2,2 GB de cofre) e o `extract` de 1 MB levou 8,8 s.
+- Smoke anterior (2 projetos, 201,8 MB): cofre 104,3 MB (1,94×), zip 1,73×,
+  7z por projeto 2,77×; `rm` 43 s → 7,1 s.
