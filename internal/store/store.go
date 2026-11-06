@@ -798,9 +798,9 @@ func (s *Store) compressBatch(batch []*frameJob) {
 }
 
 // worthCompressing amostra 4 pontos do frame (início, 1/3, 2/3, fim) com o
-// nível mais rápido. Um frame junta blocos de vários arquivos: um jpg no
-// começo não quer dizer que o resto (texto, json) não comprima. Só pula o
-// nível caro se nenhuma amostra ganhar nada.
+// nível mais rápido e, se nenhum ganhar, o frame inteiro. Um frame junta
+// blocos de vários arquivos: um jpg no começo não quer dizer que o resto
+// (texto, json) não comprima. Só pula o nível caro se nada ganhar.
 func (s *Store) worthCompressing(raw []byte) bool {
 	const probe = 32 << 10
 	const spots = 4
@@ -816,7 +816,12 @@ func (s *Store) worthCompressing(raw []byte) bool {
 			return true
 		}
 	}
-	return false
+	// As amostras não acham nada, mas a repetição pode estar a mais de 32 KB
+	// de distância dentro do frame (blocos de .sst, áudio, binários): no
+	// crom-openllm isso deixava 330 MB crus que o zstd-11 levaria a 254 MB.
+	// O nível rápido no frame inteiro decide; em dado aleatório ele é barato.
+	buf = s.fast.EncodeAll(raw, make([]byte, 0, len(raw)))
+	return len(buf) < len(raw)*99/100
 }
 
 // appendIndex grava no fim do index.log (com flock: o fim é sempre um

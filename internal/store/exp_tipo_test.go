@@ -144,11 +144,38 @@ func TestExpTipo(t *testing.T) {
 			fmt.Printf("  %-8s %8.1f MB  ordem-tipo %8.1f MB  com-dic %8.1f MB\n", k, float64(clSize[k])/1e6, float64(bk)/1e6, float64(ck)/1e6)
 		}
 	}
+	// D: blocos parecidos juntos — ordena por "super-features" (minhash de
+	// janelas de 32 bytes), como no Finesse/odess: blocos com a mesma feature
+	// têm grande chance de serem quase iguais.
+	type sb struct {
+		k    [3]uint64
+		data []byte
+	}
+	var sim []sb
+	for _, b := range blocks {
+		sim = append(sim, sb{minFeatures(b.data), b.data})
+	}
+	sort.SliceStable(sim, func(i, j int) bool {
+		a, b := sim[i].k, sim[j].k
+		if a[0] != b[0] {
+			return a[0] < b[0]
+		}
+		if a[1] != b[1] {
+			return a[1] < b[1]
+		}
+		return a[2] < b[2]
+	})
+	var simStream [][]byte
+	for _, x := range sim {
+		simStream = append(simStream, x.data)
+	}
+	d := pack(simStream, enc)
 	M := 1e6
 	fmt.Printf("%s: original %.1f MB, únicos %.1f MB, %d tipos\n", filepath.Base(src), float64(orig)/M, float64(uniq)/M, len(classes))
 	fmt.Printf("A ordem de chegada      %.1f MB\n", float64(a)/M)
 	fmt.Printf("B agrupado por tipo     %.1f MB\n", float64(b)/M)
 	fmt.Printf("C por tipo + dicionário %.1f MB (dicionários %.1f KB)\n", float64(c)/M, float64(dictTot)/1e3)
+	fmt.Printf("D blocos parecidos juntos %.1f MB\n", float64(d)/M)
 }
 
 func classOf(p string) string {
@@ -172,4 +199,37 @@ func classOf(p string) string {
 		return "txt"
 	}
 	return e
+}
+
+// minFeatures: 3 minhashes (sementes diferentes) do hash rolante de janelas de 32 bytes.
+func minFeatures(b []byte) [3]uint64 {
+	seeds := [3]uint64{0x9E3779B97F4A7C15, 0xC2B2AE3D27D4EB4F, 0x165667B19E3779F9}
+	m := [3]uint64{^uint64(0), ^uint64(0), ^uint64(0)}
+	const w = 32
+	if len(b) < w {
+		return m
+	}
+	var h uint64
+	var pow uint64 = 1
+	const base = 1099511628211
+	for i := 0; i < w; i++ {
+		h = h*base + uint64(b[i])
+		if i > 0 {
+			pow *= base
+		}
+	}
+	for i := w; ; i++ {
+		for k, sd := range seeds {
+			x := (h ^ sd) * 0xff51afd7ed558ccd
+			x ^= x >> 33
+			if x < m[k] {
+				m[k] = x
+			}
+		}
+		if i >= len(b) {
+			break
+		}
+		h = (h-uint64(b[i-w])*pow)*base + uint64(b[i])
+	}
+	return m
 }

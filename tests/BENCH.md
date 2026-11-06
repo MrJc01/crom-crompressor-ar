@@ -176,3 +176,24 @@ Leitura:
 
 Frames de 16 MiB ganham só 4% e deixam a leitura 7× mais lenta: descartado. A repetição que o zstd --long e o xz
 pegam está a centenas de MB de distância, longe demais para qualquer frame.
+
+### Blocos parecidos no mesmo frame? (crom-openllm)
+
+Ordenar os blocos únicos por "super-features" (minhash de janelas de 32 bytes, como Finesse/odess) antes de montar
+os frames de 1 MiB: 562,5 → 561,5 MB (−0,2%). Agrupar por tipo: 563,7 MB; por tipo + dicionário: 558,9 MB.
+Juntar blocos parecidos não ajuda: descartado.
+
+### Frames que ficavam crus sem precisar (06/11/2026)
+
+A amostra de 4 pontos de 32 KB dizia "não comprime" em frames cuja repetição está a mais de 32 KB de distância
+(blocos de .sst, binários). Medido com `CROM_EXP_GAP` (exp_gap_test.go) no crom-openllm: 312 frames crus (330 MB)
+que o zstd-11 levaria a 254 MB. Agora, se nenhuma amostra ganha, o nível rápido passa no frame inteiro
+(0,7 ms por MiB em dado aleatório, 1,5 GB/s) e decide com limite de 99%.
+
+| crom-openllm | cofre |
+|---|---|
+| antes | 632.4 MB |
+| frame inteiro, limite 97% | 568.7 MB |
+| frame inteiro, limite 99% (adotado) | **561.2 MB (−11%)** |
+
+crom-animate-studio-scratch com a correção: 1035.2 MB (comparação sem a correção ficou para depois).
