@@ -102,3 +102,21 @@ Nos frames comprimíveis (435 MB juntos): zstd-11 127 MB, zstd-19 114 MB, zstd-2
 Cortar em frames de 1 MiB custa ~1% (127 MB inteiro contra 129 MiB em frames). A diferença para o 7z vem do
 LZMA mais forte nessa parte; o resto (git packs, mp4, jpg, png) já vem comprimido e nenhum compressor ganha
 mais que ~4% nele. O limite em disco é: dedup + o melhor codec sobre o que é único.
+
+### Agrupar por tipo × objetos do git descomprimidos (mesmo projeto)
+
+Experimento `CROM_EXP_TIPO=<pasta> go test ./internal/store -run TestExpTipo` (blocos únicos, frames de 1 MiB):
+
+| montagem dos frames | depósito |
+|---|---|
+| ordem de chegada (atual) | 603,7 MB |
+| agrupado por tipo de arquivo | 603,1 MB |
+| por tipo + dicionário zstd treinado por tipo | 603,1 MB |
+| ordem de chegada, objetos do `.git` descomprimidos | 546,8 MB |
+
+O `.git` tinha 3.847 objetos soltos em zlib (377 MB, 40% dos dados únicos), cada um comprimido sozinho:
+não deduplicavam com os arquivos do projeto nem comprimiam no frame. Todos são recriados byte a byte pela zlib
+do sistema (nível 1), então o depósito agora guarda o conteúdo descomprimido e recomprime na leitura.
+
+Cofre novo com isso: **556,4 MB** (antes 613,1; zip -9 615,0; 7z -mx9 sólido 534,2). `add` 69 s / 403 MB de RAM;
+`extract` do projeto inteiro 13 s / 241 MB, 7.954 arquivos idênticos, `git fsck` limpo.

@@ -576,8 +576,17 @@ func (b *Batch) Put(r io.Reader) (*PutResult, error) {
 	s := b.s
 	res := &PutResult{}
 	b.results = append(b.results, res)
-	total := sha256.New()
 	recipe := &Recipe{}
+	r, z := sniffZlib(r)
+	var orig Hash
+	if z != nil {
+		// arquivo inteiro em zlib (objeto do git, .zz): guarda o conteúdo
+		// descomprimido, que deduplica com os arquivos de verdade e comprime
+		// melhor no frame; a leitura recria os bytes exatos.
+		orig, recipe.Xform, recipe.Level = z.hash, xformZlib, byte(z.level)
+		r = bytes.NewReader(z.plain)
+	}
+	total := sha256.New()
 	ch := newChunker(r)
 	for {
 		c, err := ch.next()
@@ -612,6 +621,9 @@ func (b *Batch) Put(r io.Reader) (*PutResult, error) {
 		}
 	}
 	copy(recipe.Hash[:], total.Sum(nil))
+	if z != nil {
+		recipe.Hash, recipe.Size = orig, z.size
+	}
 	res.Hash, res.Size, res.Chunks = recipe.Hash, recipe.Size, len(recipe.Chunks)
 	if s.Has(recipe.Hash) {
 		res.Existed = true
@@ -834,6 +846,11 @@ type File struct {
 	s      *Store
 	r      *Recipe
 	starts []int64 // offset de início de cada bloco
+
+	// conteúdo com transformação (zlib): recriado inteiro na primeira leitura
+	once  sync.Once
+	plain []byte
+	perr  error
 }
 
 // Open abre o conteúdo h para leitura.
@@ -862,6 +879,16 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 	if off >= f.r.Size {
 		return 0, io.EOF
 	}
+	if f.r.Xform != xformNone {
+		if err := f.materialize(); err != nil {
+			return 0, err
+		}
+		n := copy(p, f.plain[off:])
+		if n < len(p) {
+			return n, io.EOF
+		}
+		return n, nil
+	}
 	i := sort.Search(len(f.starts), func(i int) bool { return f.starts[i] > off }) - 1
 	n := 0
 	for n < len(p) && i < len(f.r.Chunks) {
@@ -881,6 +908,13 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 
 // WriteTo grava o conteúdo inteiro em w, conferindo cada bloco e o SHA-256 final.
 func (f *File) WriteTo(w io.Writer) (int64, error) {
+	if f.r.Xform != xformNone {
+		if err := f.materialize(); err != nil {
+			return 0, err
+		}
+		n, err := w.Write(f.plain)
+		return int64(n), err
+	}
 	total := sha256.New()
 	var n int64
 	for _, c := range f.r.Chunks {

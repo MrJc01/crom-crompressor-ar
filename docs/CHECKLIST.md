@@ -52,7 +52,7 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 22. [ ] Apps executando do cofre; SQLite aberto direto do cofre (somente leitura).
 
 *Fase 4 — todos os arquivos e casos de borda*
-23. [ ] Vazio, 1 byte, > RAM (5 GB+), esparso, unicode, caminho longo, symlink, hardlink, permissões, mtime, pasta vazia.
+23. [ ] Vazio, 1 byte, > RAM (5 GB+), esparso, unicode, caminho longo, symlink, hardlink, permissões, mtime, pasta vazia. Medido em 06/11: `extract` de crom-animate-agent não recria symlinks (5) nem pastas vazias (9); o conteúdo dos arquivos volta idêntico.
 24. [ ] 100 mil arquivos pequenos (`node_modules`).
 25. [ ] Disco cheio e arquivo alterado durante o import.
 
@@ -89,8 +89,9 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 45. [x] Teste de volume com 4,8 GB (7 projetos reais): cofre 2,12× (2258 MB) × zip 1,70× × 7z por projeto 2,38× × tar.zst único 2,23×. Apagar 1,4 GB: 6,6 s (7z: 164 s). Detalhes em `tests/BENCH.md`.
 49. [x] `extract` de 1 MB em 8,8 s: era disco frio + `ionice -c3` no benchmark; o custo real era decodificar o manifest inteiro (0,42 s com 75 mil entradas). Manifest agora lido e gravado em fluxo (entrada por entrada), com teste de que o formato é o mesmo.
 50. [x] RAM de pico: manifest em fluxo + limite de memória do Go (384 MB, respeita GOMEMLIMIT). extract 157 → 114 MB, add pequeno 586 → 272 MB, add grande 1,2 GB → 557 MB. Sobra fixa: 4 codificadores zstd (~140 MB); o índice em RAM ainda é pequeno nessa escala (item 9 continua para cofres bem maiores).
+51. [x] Arquivo inteiro em zlib (objetos soltos do git, 40% do crom-animate-agent) guardado descomprimido: deduplica com os arquivos do projeto e o nível zlib exato fica na receita (versão 2); a leitura recomprime com a zlib do sistema e confere o SHA-256. Os 3.847 objetos recriados byte a byte, `git fsck` limpo no extraído. Pergunta do usuário "comprime um arquivo por vez?": não — blocos deduplicados entre todos os arquivos, frames de 1 MiB misturando arquivos.
 46. [ ] Teste de volume com 10 GB (depois do de 5 GB, pedido do usuário).
-47. [ ] Fechar a diferença para o 7z/LZMA. Parcial: a amostra de compressibilidade olhava só os primeiros 64 KB do frame; agora olha 4 pontos (crom-animate-agent: 624,8 → 613,1 MB). Medido nos frames comprimíveis (435 MB): zstd-11 127 MB, zstd-19 114 MB, xz -9 102 MB; frames de 1 MiB custam só ~1%. Os frames crus são de fato incompressíveis (zstd-11 ganha 4%). Falta: nível mais alto em frames frios (recompactar em segundo plano) e o item 38.
+47. [ ] Fechar a diferença para o 7z/LZMA. Parcial: a amostra de compressibilidade olhava só os primeiros 64 KB do frame; agora olha 4 pontos (crom-animate-agent: 624,8 → 613,1 MB). Medido nos frames comprimíveis (435 MB): zstd-11 127 MB, zstd-19 114 MB, xz -9 102 MB; frames de 1 MiB custam só ~1%. Os frames crus são de fato incompressíveis (zstd-11 ganha 4%). Objetos do git guardados descomprimidos (item 51): 613,1 → 556,4 MB (7z 534,2 MB, zip 615,0 MB). Agrupar blocos por tipo e dicionário zstd por tipo: testado, ganho zero (603,7 → 603,1 MB), descartado. Falta: nível mais alto em frames frios (recompactar em segundo plano) e o item 38.
 48. [ ] Dois projetos com o mesmo caminho relativo colidem na visão normal (pastas de grupo): decidir como mostrar.
 
 **Futuro (só anotado)**

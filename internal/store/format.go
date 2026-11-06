@@ -108,9 +108,19 @@ func parseFrameHeader(b []byte) (frameHdr, error) {
 // Recipe é a lista de blocos que monta um conteúdo.
 type Recipe struct {
 	Hash   Hash
-	Size   int64
+	Size   int64 // tamanho original
 	Chunks []RecipeChunk
+	// Xform diz como os blocos viram o conteúdo original. xformZlib: os
+	// blocos são o conteúdo descomprimido e a leitura recomprime com zlib no
+	// nível Level (versão 2 da receita).
+	Xform byte
+	Level byte
 }
+
+const (
+	xformNone = 0
+	xformZlib = 1
+)
 
 // RecipeChunk é um bloco da receita.
 type RecipeChunk struct {
@@ -121,7 +131,11 @@ type RecipeChunk struct {
 func encodeRecipe(r *Recipe) []byte {
 	b := make([]byte, 0, 20+36*len(r.Chunks)+4)
 	b = append(b, recipeMagic...)
-	b = append(b, 1, 0, 0, 0)
+	if r.Xform == xformNone {
+		b = append(b, 1, 0, 0, 0)
+	} else {
+		b = append(b, 2, r.Xform, r.Level, 0)
+	}
 	b = binary.LittleEndian.AppendUint64(b, uint64(r.Size))
 	b = binary.LittleEndian.AppendUint32(b, uint32(len(r.Chunks)))
 	for _, c := range r.Chunks {
@@ -139,10 +153,16 @@ func decodeRecipe(h Hash, b []byte) (*Recipe, error) {
 	if crc32.Checksum(body, crcTab) != binary.LittleEndian.Uint32(b[len(b)-4:]) {
 		return nil, errors.New("receita: checksum não bate")
 	}
-	if b[4] != 1 {
+	if b[4] != 1 && b[4] != 2 {
 		return nil, fmt.Errorf("receita: versão %d desconhecida", b[4])
 	}
 	r := &Recipe{Hash: h, Size: int64(binary.LittleEndian.Uint64(b[8:]))}
+	if b[4] == 2 {
+		r.Xform, r.Level = b[5], b[6]
+		if r.Xform != xformZlib || r.Level > 9 {
+			return nil, fmt.Errorf("receita: transformação %d/%d desconhecida", r.Xform, r.Level)
+		}
+	}
 	n := int(binary.LittleEndian.Uint32(b[16:]))
 	if len(body) != 20+36*n {
 		return nil, errors.New("receita: tamanho não bate")
@@ -155,7 +175,7 @@ func decodeRecipe(h Hash, b []byte) (*Recipe, error) {
 		r.Chunks[i].Len = binary.LittleEndian.Uint32(p[32:])
 		total += int64(r.Chunks[i].Len)
 	}
-	if total != r.Size {
+	if r.Xform == xformNone && total != r.Size {
 		return nil, errors.New("receita: soma dos blocos não bate com o tamanho")
 	}
 	return r, nil
