@@ -9,6 +9,7 @@
 #   tests/bench_volume.sh                      # projetos padrão (~5 GB)
 #   ORIGEM=~/x PROJETOS="a b c" tests/bench_volume.sh
 #   TRAB=/outro/disco SAIDA=resultado.md tests/bench_volume.sh
+#   SO_COFRE=1 tests/bench_volume.sh           # só o cofre (sem zip/7z/tar)
 set -euo pipefail
 export LC_ALL=C
 
@@ -16,6 +17,7 @@ AQUI="$(cd "$(dirname "$0")/.." && pwd)"
 CROM="$AQUI/bin/crom-ar"
 ORIGEM="${ORIGEM:-$HOME/Documentos/GitHub}"
 PROJETOS="${PROJETOS:-opencorp opencorp-claude crom-animate-agent crom-animate-studio-scratch crompressor crompressor-stream crom-animacoes}"
+SO_COFRE="${SO_COFRE:-}"
 APAGAR="${APAGAR:-crom-animate-studio-scratch}" # projeto removido no teste de apagar
 TRAB="${TRAB:-$(mktemp -d "${TMPDIR:-/tmp}/crom-vol.XXXXXX")}"
 SAIDA="${SAIDA:-$TRAB/resultado.md}"
@@ -52,6 +54,8 @@ for p in $PROJETOS; do
   medir "$CROM" add "$src" >"$TRAB/add-$p.log" 2>&1
   t1=$(agora); rss=$(rss_mb)
   cur=$(du_b "$CROM_AR_ROOT")
+  z=0; s7=0
+  if [ -z "$SO_COFRE" ]; then
   # comparação: um arquivo compactado por projeto (como se faz no dia a dia)
   # zip sai com 18 e 7z com 1 quando há arquivo sem permissão de leitura (aviso)
   (cd "$ORIGEM" && zip -q -r -9 -y "$TRAB/p.zip" "$p" 2>/dev/null) || [ $? -eq 18 ]
@@ -61,6 +65,7 @@ for p in $PROJETOS; do
   t7b=$(agora)
   s7=$(stat -c %s "$TRAB/$p.7z")
   [ "$p" = "$APAGAR" ] && echo "$(dt "$t7" "$t7b")" >"$TRAB/.t7-$p" || rm -f "$TRAB/$p.7z"
+  fi
   tot_orig=$((tot_orig + orig)); tot_zip=$((tot_zip + z)); tot_7z=$((tot_7z + s7))
   echo "| $p | $(mb "$orig") MB | $nf | **$(mb "$cur") MB** | +$(mb $((cur - prev))) MB | $(dt "$t0" "$t1") s | $rss MB | $(mb "$z") MB | $(mb "$s7") MB |" >>"$SAIDA"
   prev=$cur
@@ -68,7 +73,8 @@ done
 
 echo ">> tar + zstd -19 --long=27 de tudo junto"
 t0=$(agora)
-tzst=$( (cd "$ORIGEM" && tar cf - $PROJETOS 2>/dev/null || true) | zstd -q -19 --long=27 -T2 -c | wc -c)
+tzst=1
+[ -n "$SO_COFRE" ] || tzst=$( (cd "$ORIGEM" && tar cf - $PROJETOS 2>/dev/null || true) | zstd -q -19 --long=27 -T2 -c | wc -c)
 t1=$(agora)
 cofre=$(du_b "$CROM_AR_ROOT")
 {
@@ -100,7 +106,7 @@ t0=$(agora)
 "$CROM" extract "$aid" -o "$TRAB/x-cofre" >/dev/null
 t1=$(agora)
 t2=$(agora)
-(cd "$TRAB" && 7z e -bd -bso0 -y -o"$TRAB/x-7z" "$APAGAR.7z" "$APAGAR/$arel" >/dev/null) || true
+[ -n "$SO_COFRE" ] || (cd "$TRAB" && 7z e -bd -bso0 -y -o"$TRAB/x-7z" "$APAGAR.7z" "$APAGAR/$arel" >/dev/null) || true
 t3=$(agora)
 {
   echo
@@ -124,11 +130,14 @@ t2=$(agora)
 t3=$(agora)
 podado=$(du_b "$CROM_AR_ROOT")
 # no 7z: apagar metade dos arquivos do projeto obriga a recomprimir o bloco sólido
+s7a=0; s7b=0; t4=$(agora); t5=$t4
+if [ -z "$SO_COFRE" ]; then
 s7a=$(stat -c %s "$TRAB/$APAGAR.7z")
 t4=$(agora)
 (cd "$TRAB" && 7z d -bd -bso0 -mmt=2 "$APAGAR.7z" "$APAGAR/*.json" -r >/dev/null) || true
 t5=$(agora)
 s7b=$(stat -c %s "$TRAB/$APAGAR.7z")
+fi
 {
   echo
   echo "## Apagar o projeto \`$APAGAR\` do cofre"

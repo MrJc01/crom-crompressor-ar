@@ -196,4 +196,21 @@ que o zstd-11 levaria a 254 MB. Agora, se nenhuma amostra ganha, o nível rápid
 | frame inteiro, limite 97% | 568.7 MB |
 | frame inteiro, limite 99% (adotado) | **561.2 MB (−11%)** |
 
-crom-animate-studio-scratch com a correção: 1035.2 MB (comparação sem a correção ficou para depois).
+crom-animate-studio-scratch: 1054.7 → 1035.2 MB (−1,8%; ali o peso é png e wav, que só encolhem com repetição a centenas de MB).
+
+10 GB de novo com a correção (`SO_COFRE=1 tests/bench_volume.sh`, mesmos 9 projetos): **3351.6 → 3250.6 MB** (3,11×).
+crom-openllm +577.3 → +509.2 MB; studio-scratch +997.7 → +979.2 MB. RAM pico 389–455 MB. Agora 43 MB acima do
+tar+zstd -19 --long único (3207.6 MB) e 233 MB acima de um 7z por projeto (3017.4 MB); zip 4628.6 MB.
+
+### Bloco parecido guardado como diferença (item 38) — medição
+
+Os .wav do studio-scratch (121 arquivos, 262,6 MB): vários têm o mesmo tamanho e diferem em ~1.500 bytes espalhados
+(341 de 410 blocos de 16 KB têm alguma diferença), então a deduplicação exata não pega. Cada bloco novo cujo
+minhash bate com um bloco anterior vira zstd com o anterior como dicionário:
+
+| .wav (únicos 114,8 MB) | disco |
+|---|---|
+| frames em ordem de chegada | 99.6 MB |
+| blocos parecidos juntos (reordenar) | 73.6 MB |
+| **delta contra o parecido** | **71.9 MB** (1569 blocos em delta somam 1,1 MB) |
+| zstd -19 --long (referência) | 64 MB |

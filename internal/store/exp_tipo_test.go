@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/dict"
 	"github.com/klauspost/compress/zstd"
@@ -170,12 +171,49 @@ func TestExpTipo(t *testing.T) {
 		simStream = append(simStream, x.data)
 	}
 	d := pack(simStream, enc)
+	// E: delta — bloco com um parecido anterior (alguma das 3 features igual)
+	// vira zstd com o parecido como dicionário; o resto vai para os frames.
+	feat := map[uint64]int{}
+	var rest [][]byte
+	var deltaB int64
+	var nDelta int
+	var tDelta time.Duration
+	for i, x := range blocks {
+		k := minFeatures(x.data)
+		base := -1
+		for _, f := range k {
+			if j, ok := feat[f]; ok {
+				base = j
+				break
+			}
+		}
+		if base >= 0 {
+			t0 := time.Now()
+			de, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1), zstd.WithEncoderDictRaw(1, blocks[base].data))
+			z := de.EncodeAll(x.data, nil)
+			de.Close()
+			tDelta += time.Since(t0)
+			if len(z)+40 < len(x.data)/2 {
+				deltaB += int64(len(z) + 40) // + referência ao bloco base
+				nDelta++
+				continue
+			}
+		}
+		for _, f := range k {
+			if _, ok := feat[f]; !ok {
+				feat[f] = i
+			}
+		}
+		rest = append(rest, x.data)
+	}
+	e := pack(rest, enc)
 	M := 1e6
 	fmt.Printf("%s: original %.1f MB, únicos %.1f MB, %d tipos\n", filepath.Base(src), float64(orig)/M, float64(uniq)/M, len(classes))
 	fmt.Printf("A ordem de chegada      %.1f MB\n", float64(a)/M)
 	fmt.Printf("B agrupado por tipo     %.1f MB\n", float64(b)/M)
 	fmt.Printf("C por tipo + dicionário %.1f MB (dicionários %.1f KB)\n", float64(c)/M, float64(dictTot)/1e3)
 	fmt.Printf("D blocos parecidos juntos %.1f MB\n", float64(d)/M)
+	fmt.Printf("E delta contra parecido %.1f MB (%d blocos em delta = %.1f MB, frames %.1f MB, %.1f s de delta)\n", float64(e+deltaB)/M, nDelta, float64(deltaB)/M, float64(e)/M, tDelta.Seconds())
 }
 
 func classOf(p string) string {
