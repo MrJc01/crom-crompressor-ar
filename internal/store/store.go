@@ -101,7 +101,12 @@ func Open(dir string, opt Options) (*Store, error) {
 	} else if err := writeFileSync(tag, []byte(formatTag)); err != nil {
 		return nil, err
 	}
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(opt.Level), zstd.WithEncoderConcurrency(opt.Workers), zstd.WithWindowSize(2<<20), zstd.WithLowerEncoderMem(true))
+	// janela do tamanho do frame: o zstd enxerga o frame inteiro
+	win := 1 << 20
+	for win < opt.FrameSize+MaxChunk && win < 64<<20 {
+		win <<= 1
+	}
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(opt.Level), zstd.WithEncoderConcurrency(opt.Workers), zstd.WithWindowSize(win), zstd.WithLowerEncoderMem(true))
 	if err != nil {
 		return nil, err
 	}

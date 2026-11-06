@@ -120,3 +120,59 @@ do sistema (nível 1), então o depósito agora guarda o conteúdo descomprimido
 
 Cofre novo com isso: **556,4 MB** (antes 613,1; zip -9 615,0; 7z -mx9 sólido 534,2). `add` 69 s / 403 MB de RAM;
 `extract` do projeto inteiro 13 s / 241 MB, 7.954 arquivos idênticos, `git fsck` limpo.
+
+## 06/11/2026 — volume: 9 projetos reais, 10,1 GB (`tests/bench_volume.sh`)
+
+Os 7 projetos do teste de 4,8 GB + crom-tv e crom-openllm. Depósito com objetos do git descomprimidos e manifest em fluxo.
+
+| projeto | original | arquivos | cofre acumulado | cofre +projeto | tempo | RAM pico | zip -9 | 7z -mx9 sólido |
+|---|---|---|---|---|---|---|---|---|
+| opencorp | 901.3 MB | 64222 | **129.5 MB** | +129.5 MB | 42.3 s | 390 MB | 296.1 MB | 135.8 MB |
+| opencorp-claude | 1105.0 MB | 37292 | **343.0 MB** | +213.4 MB | 74.6 s | 390 MB | 395.5 MB | 224.5 MB |
+| crom-animate-agent | 940.1 MB | 7954 | **875.6 MB** | +532.6 MB | 52.6 s | 390 MB | 615.0 MB | 534.2 MB |
+| crom-animate-studio-scratch | 1388.6 MB | 11647 | **1873.3 MB** | +997.7 MB | 192.2 s | 386 MB | 1180.5 MB | 857.0 MB |
+| crompressor | 256.7 MB | 512 | **2078.9 MB** | +205.6 MB | 9.4 s | 389 MB | 213.7 MB | 192.1 MB |
+| crompressor-stream | 51.1 MB | 19076 | **2131.9 MB** | +53.1 MB | 17.4 s | 389 MB | 56.0 MB | 41.5 MB |
+| crom-animacoes | 150.6 MB | 3080 | **2156.4 MB** | +24.5 MB | 15.7 s | 396 MB | 60.9 MB | 31.4 MB |
+| crom-tv | 3734.8 MB | 26134 | **2774.3 MB** | +617.9 MB | 94.5 s | 419 MB | 1089.4 MB | 660.6 MB |
+| crom-openllm | 1567.9 MB | 34977 | **3351.6 MB** | +577.3 MB | 166.6 s | 444 MB | 721.5 MB | 340.3 MB |
+| **total** | **10096.2 MB** | | **3351.6 MB** | | | | 4628.6 MB | 3017.4 MB |
+
+tar + zstd -19 --long=27 de tudo num arquivo só: **3207.6 MB** (2209.1 s).
+
+Razão (original ÷ armazenado): cofre 3.01×, zip 2.18×, 7z por projeto 3.35×, tar.zst único 3.15×.
+
+### Abrir um arquivo de 1.0 MB de dentro de `crom-animate-studio-scratch`
+
+| | tempo |
+|---|---|
+| cofre (`crom-ar extract`) | 3.3 s |
+| 7z sólido (`7z e` de um arquivo) | 17.3 s |
+
+### Apagar o projeto `crom-animate-studio-scratch` do cofre
+
+| | cofre | tempo | RAM pico |
+|---|---|---|---|
+| antes | 3351.6 MB | | |
+| `crom-ar rm` (GC automático) | 2400.6 MB (−951.1 MB) | 19.7 s | 387 MB |
+| `crom-ar doctor --prune` | 2354.7 MB (−997.0 MB no total) | 9.8 s | |
+
+Para comparar: `7z d` dos .json de dentro do .7z sólido desse projeto (857.0 → 866.2 MB) levou 179.5 s (o 7z regrava o arquivo).
+
+Leitura:
+- RAM de pico estável em 386–444 MB do primeiro ao nono projeto (no teste de 4,8 GB chegava a 1,2 GB).
+- O cofre fica 1,28 GB abaixo do zip e 144 MB acima do tar+zstd -19 único; 334 MB (11%) acima de um 7z por projeto.
+- Quase toda a diferença para o 7z está em crom-openllm (+577 contra 340 MB) e crom-animate-studio-scratch (+998 contra 857 MB).
+  A causa é repetição distante e parecida (não idêntica): frames de 1 MiB não enxergam. Por tipo, frames zstd-11 de
+  1 MiB × zstd-19 --long × xz -9: .map 55/15/18 MB, .js 41/18/18, .sst 224/126/128, .node 87/56/56, .wav 167/64/66, .png 288/250/249.
+
+### Frames maiores? (crom-openllm, 1,57 GB)
+
+| frame | cofre | ler 300 arquivos pequenos (frio) |
+|---|---|---|
+| 1 MiB (padrão) | 632.4 MB | 1.7 ms cada |
+| 4 MiB | 613.8 MB | 2.9 ms cada |
+| 16 MiB | 608.5 MB | 11.7 ms cada |
+
+Frames de 16 MiB ganham só 4% e deixam a leitura 7× mais lenta: descartado. A repetição que o zstd --long e o xz
+pegam está a centenas de MB de distância, longe demais para qualquer frame.
