@@ -214,3 +214,22 @@ minhash bate com um bloco anterior vira zstd com o anterior como dicionário:
 | blocos parecidos juntos (reordenar) | 73.6 MB |
 | **delta contra o parecido** | **71.9 MB** (1569 blocos em delta somam 1,1 MB) |
 | zstd -19 --long (referência) | 64 MB |
+
+### Delta no depósito de verdade (item 38, 06/11/2026)
+
+Implementado em `internal/store/delta.go`: bloco novo com super-feature (minhash do gear hash, 3 features) igual à
+de um bloco já guardado vira `hash da base | zstd(bloco, dicionário = base)` dentro do frame; bit alto do tamanho no
+índice marca o delta; a base nunca é delta. As features ficam em `feats.log` (60 bytes por bloco), então valem entre
+execuções. Só aceita se o delta for menor que metade do bloco, e decodifica para conferir antes de aceitar. O GC
+mantém vivas as bases de todos os deltas do índice e move o delta como está. `Options.NoDelta` desliga.
+
+Encoder com dicionário: criar custa 0,16 ms no nível rápido e 0,8 ms no padrão; nos .wav o tamanho é idêntico
+(72,6 MB nos dois), então fica o rápido.
+
+| `CROM_EXP_GAP` | sem delta | com delta |
+|---|---|---|
+| .wav do studio-scratch (262,6 MB) | 101.0 MB | **72.6 MB (−28%)** |
+| crom-openllm (1,64 GB) | 561.2 MB | **515.5 MB (−8%)**, 32.327 blocos em delta |
+| crom-animate-studio-scratch | 1035.2 MB | **1011.5 MB (−2%)** |
+
+`crom-ar add crom-openllm` num cofre vazio: 520,9 MB em disco, 89,9 s, RAM pico 389 MB (igual a antes do delta).

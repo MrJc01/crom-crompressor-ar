@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -28,19 +29,26 @@ func TestExpGap(t *testing.T) {
 	})
 	sort.Strings(files)
 	dir := t.TempDir()
-	s, err := Open(dir, Options{})
+	if os.Getenv("CROM_DELTA_NIVEL") == "default" {
+		deltaLevel = zstd.SpeedDefault
+	}
+	s, err := Open(dir, Options{NoDelta: os.Getenv("CROM_DELTA") == "off"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t0 := time.Now()
 	b, _ := s.Begin()
+	var deltas int
 	for _, f := range files {
 		fh, err := os.Open(f)
 		if err != nil {
 			continue
 		}
-		if _, err := b.Put(fh); err != nil {
+		r, err := b.Put(fh)
+		if err != nil {
 			t.Fatal(err)
 		}
+		deltas += r.DeltaChunks
 		fh.Close()
 	}
 	if err := b.Close(); err != nil {
@@ -49,7 +57,7 @@ func TestExpGap(t *testing.T) {
 	st, _ := s.Stats()
 	s.Close()
 	M := 1e6
-	fmt.Printf("DiskBytes %.1f MB\n", float64(st.DiskBytes)/M)
+	fmt.Printf("DiskBytes %.1f MB (%d blocos em delta, %.1f s)\n", float64(st.DiskBytes)/M, deltas, time.Since(t0).Seconds())
 	byExt := map[string][2]int64{}
 	filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
 		if err == nil && fi.Mode().IsRegular() {

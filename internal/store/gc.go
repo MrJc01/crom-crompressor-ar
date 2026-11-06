@@ -53,6 +53,10 @@ func (s *Store) GC(minDead float64) (GCResult, error) {
 			live[c.Hash] = true
 		}
 	}
+	// bloco em delta precisa da base (que pode não estar em receita nenhuma)
+	if err := s.markDeltaBases(live); err != nil {
+		return res, err
+	}
 	if err := s.compactRecipesLocked(rs); err != nil {
 		return res, err
 	}
@@ -75,9 +79,9 @@ func (s *Store) GC(minDead float64) (GCResult, error) {
 			f = &fstat{}
 			frames[k] = f
 		}
-		f.all += int64(l.length)
+		f.all += int64(l.size())
 		if live[h] {
-			f.live += int64(l.length)
+			f.live += int64(l.size())
 			res.LiveChunks++
 		} else {
 			res.DeadChunks++
@@ -183,7 +187,7 @@ func (s *Store) GC(minDead float64) (GCResult, error) {
 				}
 				written += int64(frameHdrLen + len(j.data) + frameTailLen)
 				for _, c := range j.chunks {
-					newIdx[c.h] = loc{seg: seg, frameOff: off, offInFrame: c.off, length: c.n}
+					newIdx[c.h] = loc{seg: seg, frameOff: off, offInFrame: c.off, length: c.length()}
 				}
 			}
 			batch = batch[:0]
@@ -201,12 +205,13 @@ func (s *Store) GC(minDead float64) (GCResult, error) {
 			return a.offInFrame < b.offInFrame
 		})
 		for _, h := range moving {
-			data, err := s.chunk(h)
+			// delta vai como está (a base também fica viva)
+			data, l, err := s.chunkPayload(h)
 			if err != nil {
 				w.close()
 				return res, err
 			}
-			fch = append(fch, pendChunk{h: h, off: uint32(len(frame)), n: uint32(len(data))})
+			fch = append(fch, pendChunk{h: h, off: uint32(len(frame)), n: uint32(len(data)), delta: l.delta()})
 			frame = append(frame, data...)
 			if len(frame) >= s.opt.FrameSize {
 				batch = append(batch, &frameJob{raw: frame, chunks: fch})
@@ -274,6 +279,9 @@ func (s *Store) Garbage() (deadChunks int, deadBytes int64, err error) {
 			live[c.Hash] = true
 		}
 	}
+	if err := s.markDeltaBases(live); err != nil {
+		return 0, 0, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.refreshLocked(false); err != nil {
@@ -282,7 +290,7 @@ func (s *Store) Garbage() (deadChunks int, deadBytes int64, err error) {
 	for h, l := range s.idx {
 		if !live[h] {
 			deadChunks++
-			deadBytes += int64(l.length)
+			deadBytes += int64(l.size())
 		}
 	}
 	return deadChunks, deadBytes, nil

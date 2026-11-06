@@ -213,7 +213,15 @@ func (s *Store) Recipe(h Hash) (*Recipe, error) {
 			if !ok {
 				return nil, fmt.Errorf("conteúdo %s: bloco único fora do índice", h.String()[:12])
 			}
-			return &Recipe{Hash: h, Size: int64(c.length), Chunks: []RecipeChunk{{Hash: h, Len: c.length}}}, nil
+			n := c.size()
+			if c.delta() {
+				d, err := s.chunk(h)
+				if err != nil {
+					return nil, err
+				}
+				n = uint32(len(d))
+			}
+			return &Recipe{Hash: h, Size: int64(n), Chunks: []RecipeChunk{{Hash: h, Len: n}}}, nil
 		}
 		b, err := readAtPath(s.rcpPath(), l.off, int(l.n))
 		if err == nil {

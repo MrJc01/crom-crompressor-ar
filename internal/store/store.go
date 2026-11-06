@@ -35,6 +35,7 @@ type Options struct {
 	Level       zstd.EncoderLevel // padrão SpeedBestCompression
 	CacheBytes  int64             // cache de frames descomprimidos (padrão 64 MiB)
 	Workers     int               // compressão paralela (padrão GOMAXPROCS)
+	NoDelta     bool              // não guardar bloco parecido como delta
 }
 
 func (o *Options) normalize() {
@@ -78,6 +79,12 @@ type Store struct {
 
 	segMu sync.Mutex
 	segs  map[uint32]*os.File
+
+	// features dos blocos que podem servir de base a um delta (só o
+	// escritor carrega; ver delta.go)
+	featM   map[uint64]uint32
+	featH   []Hash
+	featOff int64
 
 	cache *frameCache
 	enc   *zstd.Encoder
@@ -430,17 +437,28 @@ func (s *Store) readFrame(seg uint32, off uint64) ([]byte, error) {
 	return raw, nil
 }
 
-// chunk devolve os bytes de um bloco. Se o bloco mudou de lugar (GC em outro
-// processo), recarrega o índice e tenta de novo.
-func (s *Store) chunk(h Hash) ([]byte, error) {
+// chunk devolve os bytes de um bloco (recriando-o se está em delta).
+func (s *Store) chunk(h Hash) ([]byte, error) { return s.chunkDepth(h, 0) }
+
+func (s *Store) chunkDepth(h Hash, depth int) ([]byte, error) {
+	p, l, err := s.chunkPayload(h)
+	if err != nil || !l.delta() {
+		return p, err
+	}
+	return s.undelta(p, depth)
+}
+
+// chunkPayload devolve os bytes do bloco como estão no frame. Se o bloco
+// mudou de lugar (GC em outro processo), recarrega o índice e tenta de novo.
+func (s *Store) chunkPayload(h Hash) ([]byte, loc, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		l, ok := s.lookup(h)
 		if !ok {
-			return nil, fmt.Errorf("bloco %s não está no depósito", h.String()[:12])
+			return nil, l, fmt.Errorf("bloco %s não está no depósito", h.String()[:12])
 		}
 		fr, err := s.readFrame(l.seg, l.frameOff)
-		if err == nil && int(l.offInFrame)+int(l.length) <= len(fr) {
-			return fr[l.offInFrame : l.offInFrame+l.length], nil
+		if err == nil && int(l.offInFrame)+int(l.size()) <= len(fr) {
+			return fr[l.offInFrame : l.offInFrame+l.size()], l, nil
 		}
 		if attempt == 0 {
 			s.dropSegReaders()
@@ -454,9 +472,9 @@ func (s *Store) chunk(h Hash) ([]byte, error) {
 		if err == nil {
 			err = errors.New("posição do bloco fora do frame")
 		}
-		return nil, err
+		return nil, loc{}, err
 	}
-	return nil, errors.New("inalcançável")
+	return nil, loc{}, errors.New("inalcançável")
 }
 
 // ---------------------------------------------------------------- receitas
@@ -466,19 +484,28 @@ func (s *Store) chunk(h Hash) ([]byte, error) {
 // PutResult descreve uma gravação. Num lote, StoredDisk só fica completo
 // depois do Commit/Close (os frames juntam blocos de vários arquivos).
 type PutResult struct {
-	Hash       Hash  // SHA-256 do conteúdo inteiro
-	Size       int64 // bytes originais
-	Chunks     int   // blocos na receita
-	NewChunks  int   // blocos que ainda não existiam
-	NewBytes   int64 // bytes crus desses blocos
-	StoredDisk int64 // bytes que esta gravação acrescentou ao disco (estimado por frame)
-	RawFrames  int   // frames guardados crus (não comprimiam)
-	Existed    bool  // o conteúdo inteiro já estava no depósito
+	Hash        Hash  // SHA-256 do conteúdo inteiro
+	Size        int64 // bytes originais
+	Chunks      int   // blocos na receita
+	NewChunks   int   // blocos que ainda não existiam
+	NewBytes    int64 // bytes crus desses blocos
+	StoredDisk  int64 // bytes que esta gravação acrescentou ao disco (estimado por frame)
+	RawFrames   int   // frames guardados crus (não comprimiam)
+	DeltaChunks int   // blocos novos guardados como delta de um bloco parecido
+	Existed     bool  // o conteúdo inteiro já estava no depósito
 }
 
 type pendChunk struct {
 	h      Hash
 	off, n uint32
+	delta  bool // payload é um delta (ver delta.go)
+}
+
+func (c pendChunk) length() uint32 {
+	if c.delta {
+		return c.n | deltaFlag
+	}
+	return c.n
 }
 
 type contrib struct {
@@ -536,9 +563,12 @@ type Batch struct {
 	fchunks []pendChunk
 	fcont   []contrib
 	jobs    []*frameJob
-	pending map[Hash]bool // blocos esperando no frame/jobs (ainda fora do índice)
-	recs    []byte        // registros de índice ainda fora do index.log
-	recipes []*Recipe     // receitas esperando o Commit
+	pending map[Hash]bool   // blocos esperando no frame/jobs (ainda fora do índice)
+	mem     map[Hash][]byte // possíveis bases de delta ainda na memória do lote
+	ploc    map[Hash]loc    // possíveis bases já no segmento, fora do índice
+	feats   []byte          // registros de feats.log esperando o Commit
+	recs    []byte          // registros de índice ainda fora do index.log
+	recipes []*Recipe       // receitas esperando o Commit
 	results []*PutResult
 	dirty   int64 // bytes crus desde o último Commit
 	done    bool
@@ -566,13 +596,19 @@ func (s *Store) Begin() (*Batch, error) {
 		s.wmu.Unlock()
 		return nil, err
 	}
-	w, err := s.openSegWriter(false)
+	if !s.opt.NoDelta {
+		err = s.loadFeatsLocked()
+	}
+	var w *segWriter
+	if err == nil {
+		w, err = s.openSegWriter(false)
+	}
 	if err != nil {
 		funlock(lk)
 		s.wmu.Unlock()
 		return nil, err
 	}
-	return &Batch{s: s, lk: lk, w: w, pending: map[Hash]bool{},
+	return &Batch{s: s, lk: lk, w: w, pending: map[Hash]bool{}, mem: map[Hash][]byte{}, ploc: map[Hash]loc{},
 		frame: make([]byte, 0, s.opt.FrameSize+MaxChunk)}, nil
 }
 
@@ -611,13 +647,27 @@ func (b *Batch) Put(r io.Reader) (*PutResult, error) {
 		b.pending[h] = true
 		res.NewChunks++
 		res.NewBytes += int64(len(c))
-		b.fchunks = append(b.fchunks, pendChunk{h: h, off: uint32(len(b.frame)), n: uint32(len(c))})
-		if n := len(b.fcont); n > 0 && b.fcont[n-1].r == res {
-			b.fcont[n-1].raw += len(c)
-		} else {
-			b.fcont = append(b.fcont, contrib{r: res, raw: len(c)})
+		pc := pendChunk{h: h, off: uint32(len(b.frame)), n: uint32(len(c))}
+		data := c
+		if !s.opt.NoDelta && len(c) >= deltaMinChunk {
+			f := features(c)
+			if d := b.tryDelta(h, c, f); d != nil {
+				data, pc.n, pc.delta = d, uint32(len(d)), true
+				res.DeltaChunks++
+			} else {
+				// bloco guardado inteiro: pode servir de base para os próximos
+				s.addFeat(h, f)
+				b.feats = append(b.feats, encodeFeat(h, f)...)
+				b.mem[h] = b.frame[len(b.frame) : len(b.frame)+len(c)]
+			}
 		}
-		b.frame = append(b.frame, c...)
+		b.fchunks = append(b.fchunks, pc)
+		if n := len(b.fcont); n > 0 && b.fcont[n-1].r == res {
+			b.fcont[n-1].raw += len(data)
+		} else {
+			b.fcont = append(b.fcont, contrib{r: res, raw: len(data)})
+		}
+		b.frame = append(b.frame, data...)
 		b.dirty += int64(len(c))
 		if len(b.frame) >= s.opt.FrameSize {
 			if err := b.cutFrame(); err != nil {
@@ -680,8 +730,13 @@ func (b *Batch) writeJobs() error {
 			}
 		}
 		for _, c := range j.chunks {
-			l := loc{seg: seg, frameOff: off, offInFrame: c.off, length: c.n}
+			l := loc{seg: seg, frameOff: off, offInFrame: c.off, length: c.length()}
 			b.recs = append(b.recs, encodeIdx(c.h, l)...)
+			if _, ok := b.mem[c.h]; ok {
+				// o frame vai embora da memória; a base passa a ser lida do segmento
+				delete(b.mem, c.h)
+				b.ploc[c.h] = l
+			}
 		}
 	}
 	b.jobs = b.jobs[:0]
@@ -719,6 +774,14 @@ func (b *Batch) Commit() error {
 		for h := range b.pending {
 			delete(b.pending, h)
 		}
+		clear(b.ploc)
+	}
+	// features depois do índice: uma feature sem bloco é só ignorada
+	if len(b.feats) > 0 {
+		if err := s.appendFeats(b.feats); err != nil {
+			return err
+		}
+		b.feats = b.feats[:0]
 	}
 	// 3) receitas: um append no recipes.log + fsync
 	if len(b.recipes) > 0 {
