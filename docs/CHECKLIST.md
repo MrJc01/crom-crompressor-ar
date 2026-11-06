@@ -99,9 +99,12 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 53. [ ] **Decidir (usuário):** `.cromar` local. Hoje é cópia gerada na hora (extrai → tar → treina cérebro do próprio pacote → pack → zip), não fica no cofre. O usuário entende que `.cromar` e depósito ficam os dois locais.
 54. [ ] **Decidir (usuário):** sincronização em rede. O `daemon`/`pull` do motor serve arquivos `.crom` soltos de uma pasta e só fala com quem tem o MESMO cérebro (HMAC). O `.cromar` treina um cérebro por pacote → dois pacotes (ou duas versões do mesmo) não sincronizam entre si. Opções: (a) um cérebro fixo por cofre para os `.cromar`; (b) sincronizar depósito ↔ depósito por hash SHA-256 de bloco usando o transporte libp2p do motor (auth, NAT, DHT).
 55. [ ] Reaproveitar do motor: encoder zstd 19 em C (`internal/delta/compress_max_cgo.go`, DataDog/zstd) para os frames frios (item 47); AES-256-GCM (`--encrypt`) para cofre cifrado; versão do motor no `meta.json` do `.cromar` (`.crom` novo não abre em binário velho).
+57. [ ] Retreino automático (visão do usuário: "a ideia de cromprimir era exatamente ter o retreino automático"). Hoje `train --update` re-escolhe as entradas e invalida `.crom` antigos. Proposta: cérebro que só cresce (ou o próprio depósito como cérebro). Ver `docs/CONCEITOS.md` §6.
+58. [ ] Regra do usuário para a rede: blocos nunca passam, só os deltas que montam o bloco do outro lado. Segurança: autorização por pacote, resposta só a quem tem acesso, SHA-256 de cada bloco recebido, versão no protocolo (`docs/CONCEITOS.md` §7).
 56. [ ] Subir para o motor a busca de bloco parecido por minhash (`features()` do depósito): a pendência do crompressor diz que a busca aproximada só compara blocos com os mesmos 2 primeiros bytes.
 
 **Futuro (só anotado)**
+- Cofre repartido entre pessoas na rede (cada um guarda partes, acessível a todos). Análise em `docs/CONCEITOS.md` §9; provável projeto separado (crompressor-sinapse), depois do sync cofre ↔ cofre.
 - Vídeo entre arquivos diferentes: só com quadros decodificados (pendência do motor). Hoje o ganho em vídeo vem de cópias e trechos idênticos.
 - Atualizar o binário em `../crompressor/bin` (outro repositório: decidir lá).
 
@@ -111,4 +114,5 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 2. Próximo: nível mais alto em frames frios (item 47, os 144 MB que faltam para o 7z). Em seguida `tests/suite.sh` num terminal do sistema (FUSE), a migração do cofre real (item 26) e os itens 18 e 9.
 3. Dados de teste: `tests/bench_real.sh` vai baixá-los. Os desta sessão estavam no scratchpad e não ficam.
 4. FUSE só testa num terminal do sistema, fora do app Claude (`fusermount3: Operation not permitted`).
+6. Conceitos, visão do usuário e decisões abertas: `docs/CONCEITOS.md` (ler antes de mexer em `.cromar`, rede ou cérebro).
 5. O residente real está montado em `~/CromAr` (cofre em `~/Documentos/CromAr`): testes sempre com `CROM_AR_ROOT` temporário.
