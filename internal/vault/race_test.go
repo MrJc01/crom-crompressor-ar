@@ -1,7 +1,6 @@
 package vault
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,12 +65,10 @@ func entryFor(name string) *Entry {
 }
 
 func manifestByUID(root string) map[string]bool {
-	t2 := &Manifest{}
-	b, err := os.ReadFile(filepath.Join(root, "manifest.json"))
+	t2, err := ReadManifest(ManifestPath(root))
 	if err != nil {
 		return nil
 	}
-	_ = json.Unmarshal(b, t2)
 	out := map[string]bool{}
 	for _, e := range t2.Entries {
 		out[e.UID] = true

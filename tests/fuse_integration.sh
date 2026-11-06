@@ -112,7 +112,7 @@ mkdir -p "$MNT/arquivos/Antigo"
 echo "dado do pacote" > "$MNT/arquivos/Antigo/a.txt"
 mv "$MNT/arquivos/Antigo" "$MNT/arquivos/Novo" && ok "T9a mv de pacote"
 cat "$MNT/arquivos/Novo/a.txt" | grep -q "dado" && ok "T9b conteúdo após rename" || bad "T9b conteúdo após rename"
-g=$(python3 -c "import json;m=json.load(open('$CROM_AR_ROOT/manifest.json'));print(','.join({e['group'] for e in m['entries'] if 'Novo' in e['path']}))")
+g=$(zstd -dcq "$CROM_AR_ROOT/manifest.json.zst" | python3 -c "import json,sys;m=json.load(sys.stdin);print(','.join({e['group'] for e in m['entries'] if 'Novo' in e['path']}))")
 check "T9c grupo renomeado no manifest" "Novo" "$g"
 
 echo "─────────────────────────────────"

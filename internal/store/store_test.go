@@ -123,7 +123,7 @@ func TestDadoQueNaoComprimeFicaCru(t *testing.T) {
 		t.Fatal("dado aleatório deveria ir cru")
 	}
 	st, _ := s.Stats()
-	if float64(st.DiskBytes) > float64(len(b))*1.01 {
+	if float64(st.DiskBytes) > float64(len(b))*1.01+32<<10 { // + arquivos de controle
 		t.Fatalf("aleatório ocupou %d (> 1%% sobre %d)", st.DiskBytes, len(b))
 	}
 }
@@ -318,10 +318,12 @@ func TestReceitaCorrompidaRecusada(t *testing.T) {
 	dir := t.TempDir()
 	s := openT(t, dir)
 	r := put(t, s, textData(81, 300<<10))
-	p := s.recipePath(r.Hash)
+	s.Close()
+	p := filepath.Join(dir, "recipes.log")
 	b, _ := os.ReadFile(p)
-	b[30] ^= 1
+	b[rcpHdrLen+33+30] ^= 1
 	os.WriteFile(p, b, 0o644)
+	s = openT(t, dir)
 	if _, err := s.Open(r.Hash); err == nil {
 		t.Fatal("receita corrompida aceita")
 	}
@@ -425,4 +427,161 @@ func TestLoteAbortNaoDeixaReceita(t *testing.T) {
 		t.Fatal("abort deixou o conteúdo visível")
 	}
 	put(t, s, textData(2, 10<<10)) // depósito continua utilizável
+}
+
+// Milhares de arquivos pequenos não podem custar um bloco de disco cada
+// (era assim com um .rcp por conteúdo).
+func TestMuitosPequenosNaoGastamBlocoCada(t *testing.T) {
+	dir := t.TempDir()
+	s := openT(t, dir)
+	b, err := s.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw int64
+	for i := 0; i < 3000; i++ {
+		d := []byte(fmt.Sprintf("package p%d\n\nfunc F%d() int { return %d }\n", i, i, i*7))
+		raw += int64(len(d))
+		if _, err := b.Put(bytes.NewReader(d)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := s.Stats()
+	if st.Contents != 3000 {
+		t.Fatalf("esperava 3000 conteúdos, veio %d", st.Contents)
+	}
+	// ~110 B por arquivo (registro no índice + no log); zip gasta ~100 B + nome
+	if st.DiskBytes > raw+3000*130+32<<10 {
+		t.Fatalf("3000 arquivos (%d B) ocupam %d B no disco", raw, st.DiskBytes)
+	}
+}
+
+// Apagar grava um registro de remoção; o GC compacta o log; tudo sobrevive a
+// reabrir.
+func TestApagarCompactaLogDeReceitas(t *testing.T) {
+	dir := t.TempDir()
+	s := openT(t, dir)
+	var hs []Hash
+	for i := 0; i < 20; i++ {
+		hs = append(hs, put(t, s, textData(int64(200+i), 50<<10)).Hash)
+	}
+	for _, h := range hs[:15] {
+		if err := s.Remove(h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s.Has(hs[0]) {
+		t.Fatal("removido ainda aparece")
+	}
+	before, _ := os.Stat(filepath.Join(dir, "recipes.log"))
+	if _, err := s.GC(0.3); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.Stat(filepath.Join(dir, "recipes.log"))
+	if after.Size() >= before.Size() {
+		t.Fatalf("log não compactou: %d → %d", before.Size(), after.Size())
+	}
+	s.Close()
+	s2 := openT(t, dir)
+	for i, h := range hs {
+		if s2.Has(h) != (i >= 15) {
+			t.Fatalf("conteúdo %d: Has=%v depois de reabrir", i, s2.Has(h))
+		}
+	}
+	for _, h := range hs[15:] {
+		if err := s2.Verify(h); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Depósito gravado no formato antigo (recipes/ab/<sha>.rcp) é migrado ao abrir.
+func TestMigraReceitasDoFormatoAntigo(t *testing.T) {
+	dir := t.TempDir()
+	s := openT(t, dir)
+	var hs []Hash
+	var datas [][]byte
+	for i := 0; i < 5; i++ {
+		d := textData(int64(300+i), 80<<10)
+		datas = append(datas, d)
+		hs = append(hs, put(t, s, d).Hash)
+	}
+	s.Close()
+	// reescreve as receitas como arquivos soltos e apaga o log
+	s1 := openT(t, dir)
+	var rs []*Recipe
+	for _, h := range hs {
+		r, err := s1.Recipe(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rs = append(rs, r)
+	}
+	s1.Close()
+	for i, h := range hs {
+		r := rs[i]
+		x := h.String()
+		p := filepath.Join(dir, "recipes", x[:2], x+".rcp")
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, encodeRecipe(r), 0o644)
+	}
+	os.Remove(filepath.Join(dir, "recipes.log"))
+	s2 := openT(t, dir)
+	for i, h := range hs {
+		if !bytes.Equal(readAll(t, s2, h), datas[i]) {
+			t.Fatalf("conteúdo %d perdido na migração", i)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "recipes")); !os.IsNotExist(err) {
+		t.Fatal("pasta antiga de receitas não foi removida")
+	}
+}
+
+// GC com frames quase todos vivos: copia o frame sem recomprimir, mantém os
+// blocos mortos de dentro dele reaproveitáveis, e GC(0) compacta de vez.
+func TestGCCopiaFrameQuaseVivoSemRecomprimir(t *testing.T) {
+	s := openT(t, t.TempDir())
+	big := textData(51, 6<<20)
+	small := randData(52, 40<<10) // pequeno: cai dentro de um frame com o grande
+	b, err := s.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs, err := b.Put(bytes.NewReader(small))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, err := b.Put(bytes.NewReader(big))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove(rs.Hash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GC(0.3); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(readAll(t, s, rb.Hash), big) {
+		t.Fatal("GC estragou o conteúdo vivo")
+	}
+	// o bloco morto ficou dentro do frame copiado: reimportar não grava nada
+	if r := put(t, s, small); r.NewChunks != 0 {
+		t.Fatalf("bloco morto mantido não foi reaproveitado (%d novos)", r.NewChunks)
+	}
+	s.Remove(rs.Hash)
+	if _, err := s.GC(0.0); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err := s.Garbage(); err != nil || n != 0 {
+		t.Fatalf("GC(0) deixou %d blocos mortos (%v)", n, err)
+	}
+	if !bytes.Equal(readAll(t, s, rb.Hash), big) {
+		t.Fatal("GC(0) estragou o conteúdo vivo")
+	}
 }

@@ -139,7 +139,7 @@ func (s *Store) releaseBlocks(removed []*Entry) {
 			live[e.ID] = true
 		}
 	}
-	var gone int
+	var hs []store.Hash
 	for _, e := range removed {
 		if !e.IsBlocks() || live[e.ID] {
 			continue
@@ -148,21 +148,30 @@ func (s *Store) releaseBlocks(removed []*Entry) {
 		if err != nil {
 			continue
 		}
-		var rerr error
-		if s.activeBatch != nil { // um Add de pasta está gravando: usa o lote dele
-			rerr = s.activeBatch.Remove(h)
-		} else {
-			bs, err := s.Blocks()
-			if err != nil {
-				return
-			}
-			rerr = bs.Remove(h)
-		}
-		if rerr == nil {
-			live[e.ID] = true // não remover duas vezes
-			gone++
-		}
+		live[e.ID] = true // não remover duas vezes
+		hs = append(hs, h)
 	}
+	if len(hs) == 0 {
+		return
+	}
+	var rerr error
+	if s.activeBatch != nil { // um Add de pasta está gravando: usa o lote dele
+		for _, h := range hs {
+			if err := s.activeBatch.Remove(h); err != nil {
+				rerr = err
+			}
+		}
+	} else {
+		bs, err := s.Blocks()
+		if err != nil {
+			return
+		}
+		rerr = bs.Remove(hs...) // um fsync para todos
+	}
+	if rerr != nil {
+		fmt.Fprintf(os.Stderr, "! depósito: remoção: %v\n", rerr)
+	}
+	gone := len(hs)
 	if gone == 0 || s.activeBatch != nil { // GC fica para depois do lote (doctor --prune)
 		return
 	}

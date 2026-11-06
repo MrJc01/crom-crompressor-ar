@@ -51,7 +51,9 @@ func (o *Options) normalize() {
 		o.CacheBytes = 64 << 20
 	}
 	if o.Workers <= 0 {
-		o.Workers = runtime.GOMAXPROCS(0)
+		// cada encoder SpeedBestCompression guarda dezenas de MB: limitar a 4
+		// mantém o pico de RAM baixo em PC modesto sem perder muita vazão
+		o.Workers = min(runtime.GOMAXPROCS(0), 4)
 	}
 }
 
@@ -68,6 +70,12 @@ type Store struct {
 	idxOff int64
 	idxIno uint64
 
+	rcp     map[Hash]rloc // receitas no recipes.log (protegido por mu)
+	rcpOff  int64
+	rcpIno  uint64
+	rcpDead int  // registros mortos no log (o GC compacta)
+	rcpBad  bool // log com registro corrompido: GC recusa
+
 	segMu sync.Mutex
 	segs  map[uint32]*os.File
 
@@ -80,7 +88,7 @@ type Store struct {
 // Open abre (ou cria) o depósito em dir.
 func Open(dir string, opt Options) (*Store, error) {
 	opt.normalize()
-	for _, d := range []string{dir, filepath.Join(dir, "seg"), filepath.Join(dir, "recipes")} {
+	for _, d := range []string{dir, filepath.Join(dir, "seg")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, err
 		}
@@ -93,27 +101,24 @@ func Open(dir string, opt Options) (*Store, error) {
 	} else if err := writeFileSync(tag, []byte(formatTag)); err != nil {
 		return nil, err
 	}
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(opt.Level), zstd.WithEncoderConcurrency(opt.Workers), zstd.WithLowerEncoderMem(false))
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(opt.Level), zstd.WithEncoderConcurrency(opt.Workers), zstd.WithWindowSize(2<<20), zstd.WithLowerEncoderMem(true))
 	if err != nil {
 		return nil, err
 	}
-	fast, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(opt.Workers))
-	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(0))
+	fast, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(opt.Workers), zstd.WithWindowSize(2<<20), zstd.WithLowerEncoderMem(true))
+	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(min(runtime.GOMAXPROCS(0), 4)), zstd.WithDecoderLowmem(true), zstd.WithDecoderMaxWindow(64<<20))
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, opt: opt, idx: map[Hash]loc{}, pend: map[Hash]*Recipe{}, segs: map[uint32]*os.File{},
-		cache: newFrameCache(opt.CacheBytes), enc: enc, fast: fast, dec: dec}
-	// limpa receitas temporárias de uma gravação interrompida
-	if tmps, _ := filepath.Glob(filepath.Join(dir, "recipes", "*", "*.tmp")); len(tmps) > 0 {
-		for _, t := range tmps {
-			os.Remove(t)
-		}
-	}
+	s := &Store{dir: dir, opt: opt, idx: map[Hash]loc{}, pend: map[Hash]*Recipe{}, rcp: map[Hash]rloc{},
+		segs: map[uint32]*os.File{}, cache: newFrameCache(opt.CacheBytes), enc: enc, fast: fast, dec: dec}
 	s.mu.Lock()
 	err = s.refreshLocked(false)
 	s.mu.Unlock()
 	if err != nil {
+		return nil, err
+	}
+	if err := s.migrateRecipeFiles(); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -159,9 +164,17 @@ func funlock(f *os.File) {
 
 func (s *Store) idxPath() string { return filepath.Join(s.dir, "index.log") }
 
-// refreshLocked lê do index.log o que outros processos gravaram. Com
-// writer=true (flock exclusivo), um final cortado por queda é truncado.
+// refreshLocked lê do index.log e do recipes.log o que outros processos
+// gravaram. Com writer=true (flock exclusivo), um final cortado por queda é
+// truncado.
 func (s *Store) refreshLocked(writer bool) error {
+	if err := s.refreshIndexLocked(writer); err != nil {
+		return err
+	}
+	return s.refreshRecipesLocked(writer)
+}
+
+func (s *Store) refreshIndexLocked(writer bool) error {
 	f, err := os.Open(s.idxPath())
 	if os.IsNotExist(err) {
 		s.idx, s.idxOff, s.idxIno = map[Hash]loc{}, 0, 0
@@ -358,31 +371,40 @@ func (s *Store) dropSegReaders() {
 	s.segMu.Unlock()
 }
 
+// readRawFrame lê um frame como está gravado (comprimido), conferindo o CRC.
+func (s *Store) readRawFrame(seg uint32, off uint64) (frameHdr, []byte, error) {
+	f, err := s.segReader(seg)
+	if err != nil {
+		return frameHdr{}, nil, err
+	}
+	hb := make([]byte, frameHdrLen)
+	if _, err := f.ReadAt(hb, int64(off)); err != nil {
+		return frameHdr{}, nil, fmt.Errorf("segmento %d @%d: %w", seg, off, err)
+	}
+	hd, err := parseFrameHeader(hb)
+	if err != nil {
+		return frameHdr{}, nil, fmt.Errorf("segmento %d @%d: %w", seg, off, err)
+	}
+	data := make([]byte, int(hd.compLen)+frameTailLen)
+	if _, err := f.ReadAt(data, int64(off)+frameHdrLen); err != nil {
+		return frameHdr{}, nil, fmt.Errorf("segmento %d @%d: %w", seg, off, err)
+	}
+	comp, tail := data[:hd.compLen], data[hd.compLen:]
+	if crc32.Checksum(comp, crcTab) != uint32(tail[0])|uint32(tail[1])<<8|uint32(tail[2])<<16|uint32(tail[3])<<24 {
+		return frameHdr{}, nil, fmt.Errorf("segmento %d @%d: checksum do frame não bate (dado corrompido)", seg, off)
+	}
+	return hd, comp, nil
+}
+
 // readFrame devolve o frame descomprimido (do cache, se houver).
 func (s *Store) readFrame(seg uint32, off uint64) ([]byte, error) {
 	key := frameKey{seg, off}
 	if b := s.cache.get(key); b != nil {
 		return b, nil
 	}
-	f, err := s.segReader(seg)
+	hd, comp, err := s.readRawFrame(seg, off)
 	if err != nil {
 		return nil, err
-	}
-	hb := make([]byte, frameHdrLen)
-	if _, err := f.ReadAt(hb, int64(off)); err != nil {
-		return nil, fmt.Errorf("segmento %d @%d: %w", seg, off, err)
-	}
-	hd, err := parseFrameHeader(hb)
-	if err != nil {
-		return nil, fmt.Errorf("segmento %d @%d: %w", seg, off, err)
-	}
-	data := make([]byte, int(hd.compLen)+frameTailLen)
-	if _, err := f.ReadAt(data, int64(off)+frameHdrLen); err != nil {
-		return nil, fmt.Errorf("segmento %d @%d: %w", seg, off, err)
-	}
-	comp, tail := data[:hd.compLen], data[hd.compLen:]
-	if crc32.Checksum(comp, crcTab) != uint32(tail[0])|uint32(tail[1])<<8|uint32(tail[2])<<16|uint32(tail[3])<<24 {
-		return nil, fmt.Errorf("segmento %d @%d: checksum do frame não bate (dado corrompido)", seg, off)
 	}
 	var raw []byte
 	switch hd.codec {
@@ -433,73 +455,6 @@ func (s *Store) chunk(h Hash) ([]byte, error) {
 }
 
 // ---------------------------------------------------------------- receitas
-
-func (s *Store) recipePath(h Hash) string {
-	x := h.String()
-	return filepath.Join(s.dir, "recipes", x[:2], x+".rcp")
-}
-
-// Has diz se o conteúdo h já está no depósito.
-func (s *Store) Has(h Hash) bool {
-	s.mu.RLock()
-	_, ok := s.pend[h]
-	s.mu.RUnlock()
-	if ok {
-		return true
-	}
-	_, err := os.Stat(s.recipePath(h))
-	return err == nil
-}
-
-// Recipe lê a receita do conteúdo h.
-func (s *Store) Recipe(h Hash) (*Recipe, error) {
-	s.mu.RLock()
-	r, ok := s.pend[h]
-	s.mu.RUnlock()
-	if ok {
-		return r, nil
-	}
-	b, err := os.ReadFile(s.recipePath(h))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("conteúdo %s não está no depósito", h.String()[:12])
-		}
-		return nil, err
-	}
-	return decodeRecipe(h, b)
-}
-
-// Contents lista os conteúdos guardados.
-func (s *Store) Contents() ([]Hash, error) {
-	var out []Hash
-	root := filepath.Join(s.dir, "recipes")
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".rcp") {
-			return err
-		}
-		if h, err := ParseHash(strings.TrimSuffix(d.Name(), ".rcp")); err == nil {
-			out = append(out, h)
-		}
-		return nil
-	})
-	return out, err
-}
-
-// Remove apaga a receita de h. Os blocos que ficarem sem dono saem no GC.
-func (s *Store) Remove(h Hash) error {
-	s.wmu.Lock()
-	defer s.wmu.Unlock()
-	lk, err := s.flock()
-	if err != nil {
-		return err
-	}
-	defer funlock(lk)
-	err = os.Remove(s.recipePath(h))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
-}
 
 // ---------------------------------------------------------------- gravação
 
@@ -665,7 +620,7 @@ func (b *Batch) Put(r io.Reader) (*PutResult, error) {
 		s.mu.Lock()
 		s.pend[recipe.Hash] = recipe
 		s.mu.Unlock()
-		res.StoredDisk += int64(20 + 36*len(recipe.Chunks) + 4)
+		res.StoredDisk += int64(len(recipeRecord(recipe)))
 	}
 	if b.dirty >= batchMaxBytes || len(b.recipes) >= batchMaxRecipes {
 		if err := b.Commit(); err != nil {
@@ -748,35 +703,24 @@ func (b *Batch) Commit() error {
 			delete(b.pending, h)
 		}
 	}
-	// 3) receitas: grava todas, sincroniza o sistema de arquivos uma vez, renomeia
+	// 3) receitas: um append no recipes.log + fsync
 	if len(b.recipes) > 0 {
-		tmps := make([]string, len(b.recipes))
-		for i, r := range b.recipes {
-			p := s.recipePath(r.Hash)
-			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-				return err
-			}
-			tmps[i] = p + ".tmp"
-			if err := os.WriteFile(tmps[i], encodeRecipe(r), 0o644); err != nil {
-				return err
-			}
+		var buf []byte
+		for _, r := range b.recipes {
+			buf = append(buf, recipeRecord(r)...)
 		}
-		if err := s.syncFS(); err != nil {
-			return err
-		}
-		for i, r := range b.recipes {
-			if err := os.Rename(tmps[i], s.recipePath(r.Hash)); err != nil {
-				return err
-			}
-		}
-		if err := s.syncFS(); err != nil {
+		if err := s.appendRecipes(buf); err != nil {
 			return err
 		}
 		s.mu.Lock()
+		err := s.refreshLocked(true)
 		for _, r := range b.recipes {
 			delete(s.pend, r.Hash)
 		}
 		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		b.recipes = b.recipes[:0]
 	}
 	b.dirty = 0
@@ -993,18 +937,16 @@ func (s *Store) Stats() (Stats, error) {
 	s.mu.Lock()
 	s.refreshLocked(false)
 	st.UniqueChunks = len(s.idx)
+	st.Contents = len(s.rcp)
 	s.mu.Unlock()
 	err := filepath.WalkDir(s.dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
 		if fi, err := d.Info(); err == nil {
-			st.DiskBytes += fi.Size()
+			st.DiskBytes += allocated(fi)
 		}
-		switch {
-		case strings.HasSuffix(p, ".rcp"):
-			st.Contents++
-		case strings.HasSuffix(p, ".seg"):
+		if strings.HasSuffix(p, ".seg") {
 			st.Segments++
 		}
 		return nil
@@ -1013,6 +955,15 @@ func (s *Store) Stats() (Stats, error) {
 }
 
 // ---------------------------------------------------------------- utilidades
+
+// allocated é o que o arquivo ocupa de fato no disco (blocos alocados), não
+// o tamanho aparente: arquivo de 100 bytes gasta um bloco inteiro.
+func allocated(fi os.FileInfo) int64 {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return st.Blocks * 512
+	}
+	return fi.Size()
+}
 
 // syncFS sincroniza o sistema de arquivos do depósito (uma chamada no lugar
 // de um fsync por arquivo).
@@ -1072,9 +1023,5 @@ func (b *Batch) Remove(h Hash) error {
 			break
 		}
 	}
-	err := os.Remove(s.recipePath(h))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
+	return s.removeRecipeLocked(h)
 }

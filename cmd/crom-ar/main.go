@@ -1381,32 +1381,37 @@ func cmdDoctor(args []string) error {
 		okf("config.json válido (cofre: " + cfg.Root + ")")
 	}
 
-	// 2) manifest.json (com resgate do .bak)
-	manPath := filepath.Join(root, "manifest.json")
+	// 2) manifest (com resgate do .bak)
+	manPath := vault.ManifestPath(root)
+	if _, err := os.Stat(manPath); err != nil {
+		if old := filepath.Join(root, "manifest.json"); fileExists(old) {
+			manPath = old // formato anterior, ainda não migrado
+		}
+	}
 	var man vault.Manifest
-	if b, err := os.ReadFile(manPath); err != nil {
-		fail("manifest.json ilegível: " + err.Error())
-	} else if err := json.Unmarshal(b, &man); err != nil {
+	if _, err := os.Stat(manPath); err != nil {
+		fail("manifest ilegível: " + err.Error())
+	} else if m, err := vault.ReadManifest(manPath); err != nil {
 		bak := manPath + ".bak"
-		if bb, berr := os.ReadFile(bak); berr == nil {
+		if mb, berr := vault.ReadManifest(bak); berr == nil {
 			if *fix {
+				bb, _ := os.ReadFile(bak)
 				if werr := os.WriteFile(manPath, bb, 0o644); werr == nil {
-					if json.Unmarshal(bb, &man) == nil {
-						okf("manifest.json corrompido — restaurado do .bak")
-					} else {
-						fail("manifest e .bak corrompidos — cofre precisa de reconstrução manual")
-					}
+					man = *mb
+					okf("manifest corrompido — restaurado do .bak")
 				} else {
 					fail("falha ao restaurar do .bak: " + werr.Error())
 				}
 			} else {
-				warn("manifest.json corrompido mas .bak saudável — rode: crom-ar doctor --fix")
-				_ = bb
+				warn("manifest corrompido mas .bak saudável — rode: crom-ar doctor --fix")
 			}
+		} else if fileExists(bak) {
+			fail("manifest e .bak corrompidos — cofre precisa de reconstrução manual")
 		} else {
-			fail("manifest.json corrompido e sem .bak — reconstrução manual necessária")
+			fail("manifest corrompido e sem .bak — reconstrução manual necessária")
 		}
 	} else {
+		man = *m
 		okf(fmt.Sprintf("manifest válido (%d entradas, %d pastas)", len(man.Entries), len(man.Folders)))
 	}
 
@@ -1569,4 +1574,9 @@ func regenerateToken() (string, error) {
 		return "", err
 	}
 	return tok, nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }

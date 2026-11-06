@@ -3,12 +3,14 @@
 package vault
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/MrJc01/crom-crompressor-ar/internal/store"
+	"github.com/klauspost/compress/zstd"
 	"io"
 	"os"
 	"os/exec"
@@ -66,13 +68,14 @@ type Manifest struct {
 
 // Store agrega config + manifest e o acesso ao binário crompressor.
 type Store struct {
-	Cfg     *Config
-	Man     *Manifest
-	manPath string
-	timeNow func() time.Time
-	mu      sync.Mutex
-	sem     chan struct{}
-	dataMu  sync.RWMutex // protege as fatias Man.Entries/Man.Folders contra leitores concorrentes (painel web)
+	Cfg       *Config
+	Man       *Manifest
+	manPath   string
+	legacyMan string // manifest.json do formato anterior, apagado após migrar
+	timeNow   func() time.Time
+	mu        sync.Mutex
+	sem       chan struct{}
+	dataMu    sync.RWMutex // protege as fatias Man.Entries/Man.Folders contra leitores concorrentes (painel web)
 
 	// Consistência residente × CLI: mutações locais não salvas são marcadas
 	// (dirty) e as remoções anotadas (deleted); no Save, se o manifest em
@@ -262,7 +265,7 @@ func LoadStore(root string) (*Store, error) {
 	if cfg.Root == "" {
 		cfg.Root = root
 	}
-	s := &Store{Cfg: &cfg, manPath: filepath.Join(root, "manifest.json"), timeNow: time.Now, sem: make(chan struct{}, 3)}
+	s := &Store{Cfg: &cfg, manPath: ManifestPath(root), timeNow: time.Now, sem: make(chan struct{}, 3)}
 	if err := os.MkdirAll(cfg.VaultDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -278,6 +281,14 @@ func LoadStore(root string) (*Store, error) {
 	}
 	if m, err := loadManifest(s.manPath); err == nil {
 		s.Man = m
+	} else if legacy := filepath.Join(root, legacyManifest); fileExists(legacy) && !fileExists(s.manPath) {
+		// cofre do formato anterior (JSON cru): migra no próximo Save
+		if m, err := loadManifest(legacy); err == nil {
+			s.Man = m
+			s.legacyMan = legacy
+		} else {
+			s.Man = &Manifest{Version: manifestVersion}
+		}
 	} else {
 		s.Man = &Manifest{Version: manifestVersion}
 	}
@@ -413,8 +424,13 @@ func (s *Store) Save() error {
 	if b, err := os.ReadFile(s.manPath); err == nil {
 		_ = os.WriteFile(s.manPath+".bak", b, 0o644)
 	}
-	if err := writeJSON(s.manPath, s.Man); err != nil {
+	if err := writeManifest(s.manPath, s.Man); err != nil {
 		return err
+	}
+	if s.legacyMan != "" { // migrado para o formato comprimido
+		os.Remove(s.legacyMan)
+		os.Remove(s.legacyMan + ".bak")
+		s.legacyMan = ""
 	}
 	if st, err := os.Stat(s.manPath); err == nil {
 		s.saveMuHeldSync(st)
@@ -464,16 +480,67 @@ func (s *Store) HasContent(hash string) bool {
 	return s.hasBlocks(hash)
 }
 
+// O manifest fica em manifest.json.zst: JSON comprimido com zstd. Com 150 mil
+// arquivos o JSON cru passava de 100 MB (mais a cópia .bak) e era regravado
+// inteiro a cada Save; comprimido cai para poucos MB. Nome novo de propósito:
+// um binário antigo não lê o arquivo como "manifest corrompido".
+const (
+	manifestName   = "manifest.json.zst"
+	legacyManifest = "manifest.json"
+)
+
+// ManifestPath devolve o caminho do manifest do cofre em root.
+func ManifestPath(root string) string { return filepath.Join(root, manifestName) }
+
+// ReadManifest lê um manifest (comprimido ou JSON cru).
+func ReadManifest(path string) (*Manifest, error) { return loadManifest(path) }
+
+var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
+
 func loadManifest(path string) (*Manifest, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+	if bytes.HasPrefix(b, zstdMagic) {
+		d, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
+		if err != nil {
+			return nil, err
+		}
+		b, err = d.DecodeAll(b, nil)
+		d.Close()
+		if err != nil {
+			return nil, fmt.Errorf("manifest: %w", err)
+		}
 	}
 	m := &Manifest{}
 	if err := json.Unmarshal(b, m); err != nil {
 		return nil, err
 	}
 	return m, nil
+}
+
+func writeManifest(path string, m *Manifest) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	e, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		return err
+	}
+	z := e.EncodeAll(b, nil)
+	e.Close()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, z, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 func writeJSON(path string, v any) error {

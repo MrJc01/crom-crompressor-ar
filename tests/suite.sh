@@ -85,7 +85,7 @@ cp /tmp/suite-doc.txt "$MNT/arquivos/Pk1/doc.txt"
 cp /tmp/suite-bin.bin "$MNT/arquivos/Pk1/bin.bin"
 wait_settle
 check "T2b 2 membros" "2" "$(ls "$MNT/arquivos/Pk1" | wc -l)"
-g=$(python3 -c "import json;m=json.load(open('$CROM_AR_ROOT/manifest.json'));print(','.join({e['group'] for e in m['entries'] if '/Pk1/' in e['path']}))")
+g=$(zstd -dcq "$CROM_AR_ROOT/manifest.json.zst" | python3 -c "import json,sys;m=json.load(sys.stdin);print(','.join({e['group'] for e in m['entries'] if '/Pk1/' in e['path']}))")
 check "T2c grupo=Pk1" "Pk1" "$g"
 cp "$MNT/arquivos/Pk1/doc.txt" "$MNT/arquivos/Pk1/doc-copia.txt"
 wait_settle
@@ -96,9 +96,9 @@ c1=$(ls "$CROM_AR_ROOT/vault" | wc -l)
 check "T2d dedup no pacote" "$c0" "$c1"
 mv "$MNT/arquivos/Pk1/bin.bin" "$MNT/arquivos/Pk1/bin-movido.bin" && ok "T2e rename membro"
 mv "$MNT/arquivos/Pk1/doc.txt" "$MNT/doc-solto.txt" && ok "T2f sair do pacote"
-python3 -c "
+zstd -dcq "$CROM_AR_ROOT/manifest.json.zst" | python3 -c "
 import json,sys
-m=json.load(open('$CROM_AR_ROOT/manifest.json'))
+m=json.load(sys.stdin)
 for e in m['entries']:
     if e['path']=='/doc-solto.txt':
         print('ok' if e['group']=='doc-solto.txt' else 'grupo errado: '+e['group']); sys.exit(0)
@@ -228,9 +228,9 @@ cp /usr/bin/true "$MNT/app755.bin" && wait_settle
 "$MNT/app755.bin" && ok "T9b app executado DIRETO do cofre" || bad "T9b exec direto"
 echo "texto comum" > "$MNT/app644.txt" && wait_settle
 sleep 1.2 # passa do timeout de cache de attrs do kernel (~1s)
-[ ! -x "$MNT/app644.txt" ] && ok "T9c texto sem exec bit" || bad "T9c exec bit indevido" "$(stat -c '%A %a' "$MNT/app644.txt" 2>&1) / manifest: $(python3 -c "
-import json
-m=json.load(open('$CROM_AR_ROOT/manifest.json'))
+[ ! -x "$MNT/app644.txt" ] && ok "T9c texto sem exec bit" || bad "T9c exec bit indevido" "$(stat -c '%A %a' "$MNT/app644.txt" 2>&1) / manifest: $(zstd -dcq "$CROM_AR_ROOT/manifest.json.zst" | python3 -c "
+import json,sys
+m=json.load(sys.stdin)
 print(','.join(oct(e.get('mode',0)) for e in m['entries'] if 'app644' in e['name']))" 2>/dev/null)"
 chmod +x "$MNT/app644.txt" 2>/dev/null && [ -x "$MNT/app644.txt" ] && ok "T9d chmod na montagem persiste" || bad "T9d chmod"
 rm -rf "$R/ext-modo"
@@ -283,9 +283,9 @@ CROM_AR_ROOT=$CROM_AR_ROOT CROMPRESSOR_BIN=$CROMPRESSOR_BIN $BIN add /tmp/suite-
 # dispara um Save do residente (criação de pasta via API persiste o manifest)
 curl -s -X POST -H "Content-Type: application/json" -d '{"path":"/lixeira-suite"}' -H "X-Crom-Token: $TTOK" "$TT/api/folder/create" >/dev/null 2>&1; true
 sleep 1
-python3 -c "
+zstd -dcq "$CROM_AR_ROOT/manifest.json.zst" | python3 -c "
 import json,sys
-m=json.load(open('$CROM_AR_ROOT/manifest.json'))
+m=json.load(sys.stdin)
 sys.exit(0 if any('suite-cli' in e['name'] for e in m['entries']) else 1)" && ok "T14a Save do residente preservou entrada do CLI (merge)" || bad "T14a residente apagou entrada do CLI"
 CROM_AR_ROOT=$CROM_AR_ROOT CROMPRESSOR_BIN=$CROMPRESSOR_BIN $BIN rm suite-cli.txt >/dev/null 2>&1; true
 kill "$TRAYPID" 2>/dev/null; sleep 1
@@ -339,12 +339,12 @@ CROM_AR_ROOT=$DR $BIN doctor 2>/dev/null | grep -q "rode: crom-ar doctor --prune
 CROM_AR_ROOT=$DR $BIN doctor --prune >/dev/null 2>&1
 [ ! -f "$DR/vault/orfao00000000000000000000000000000000000000000000000000000000000000.crom" ] && ok "T18c --prune apagou órfão" || bad "T18c prune"
 # manifest corrompido -> --fix restaura do .bak
-echo '{"corrompido' > "$DR/manifest.json"
+echo '{"corrompido' > "$DR/manifest.json.zst"
 CROM_AR_ROOT=$DR $BIN doctor 2>/dev/null | grep -q "doctor --fix" && ok "T18d doctor sugere --fix" || bad "T18d sugestão"
 CROM_AR_ROOT=$DR $BIN doctor --fix >/dev/null 2>&1
-python3 -c "
+zstd -dcq "$DR/manifest.json.zst" | python3 -c "
 import json,sys
-m=json.load(open('$DR/manifest.json'))
+m=json.load(sys.stdin)
 sys.exit(0 if any(e['name']=='suite-doc-dr.txt' for e in m['entries']) else 1)" && ok "T18e --fix restaurou manifest do .bak" || bad "T18e restore"
 
 # S19 - token rotate: novo valor, 0600, dono preservado

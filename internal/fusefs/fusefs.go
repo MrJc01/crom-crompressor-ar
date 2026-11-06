@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -45,12 +46,14 @@ type VaultFS struct {
 }
 
 type pendingFile struct {
-	size         int64
+	// size e os três flags são lidos pelo janitor, pelo Getattr e pelo
+	// Release em goroutines diferentes, sem pendMu: por isso atômicos
+	size         atomic.Int64
 	mtime        time.Time
 	tmp          string
-	orphan       bool // desvinculado antes do close: dados devem sumir
-	handleClosed bool // último fd fechado: pronto para importar
-	imported     bool // já importado (aguardando limpeza)
+	orphan       atomic.Bool // desvinculado antes do close: dados devem sumir
+	handleClosed atomic.Bool // último fd fechado: pronto para importar
+	imported     atomic.Bool // já importado (aguardando limpeza)
 	importing    bool
 	opts         *vault.AddFileOpts // metadados p/ importar (persistidos em sidecar .meta)
 }
@@ -64,7 +67,7 @@ func (v *VaultFS) startJanitor() {
 		defer t.Stop()
 		for range t.C {
 			for name, p := range v.pendingSnapshot() {
-				if p.handleClosed && !p.imported && !p.orphan {
+				if p.handleClosed.Load() && !p.imported.Load() && !p.orphan.Load() {
 					if v.importPending(name, p) {
 						v.dropPending(name)
 					}
@@ -86,7 +89,7 @@ func (v *VaultFS) pendingSnapshot() map[string]*pendingFile {
 
 // tryImportPending importa sob demanda (leitores esperam o pack terminar).
 func (v *VaultFS) tryImportPending(name string) {
-	if p := v.getPending(name); p != nil && p.handleClosed && !p.imported && !p.orphan {
+	if p := v.getPending(name); p != nil && p.handleClosed.Load() && !p.imported.Load() && !p.orphan.Load() {
 		if v.importPending(name, p) {
 			v.dropPending(name)
 		}
@@ -125,7 +128,7 @@ func (v *VaultFS) importPending(name string, p *pendingFile) bool {
 		_ = os.Rename(p.tmp, v.spoolPath(e.ID))
 	}
 	v.pendMu.Lock()
-	p.imported = true
+	p.imported.Store(true)
 	v.pendMu.Unlock()
 	return true
 }
@@ -242,7 +245,7 @@ func (v *VaultFS) pendingMap() map[string]*pendingFile {
 func (v *VaultFS) setPendingSize(name string, size int64) {
 	v.pendMu.Lock()
 	if p := v.pending[name]; p != nil {
-		p.size = size
+		p.size.Store(size)
 		p.mtime = time.Now()
 	}
 	v.pendMu.Unlock()
@@ -406,13 +409,13 @@ func (v *VaultFS) GetAttr(name string, ctx *fuse.Context) (*fuse.Attr, fuse.Stat
 		out.Ctime = out.Atime
 		return out, fuse.OK
 	}
-	if p := v.getPending(name); p != nil && !p.orphan {
+	if p := v.getPending(name); p != nil && !p.orphan.Load() {
 		pm := uint32(0)
 		if p.opts != nil {
 			pm = p.opts.Mode
 		}
 		out.Mode = fuse.S_IFREG | fileModePerm(pm)
-		out.Size = uint64(p.size)
+		out.Size = uint64(p.size.Load())
 		out.Nlink = 1
 		out.Atime = uint64(p.mtime.Unix())
 		out.Mtime = out.Atime
@@ -506,9 +509,9 @@ func (c *cromFile) Release() {
 	}
 	if p := c.fs.getPending(c.name); p != nil {
 		if st, err := os.Stat(c.tmp); err == nil {
-			p.size = st.Size()
+			p.size.Store(st.Size())
 		}
-		p.handleClosed = true
+		p.handleClosed.Store(true)
 	}
 }
 
@@ -657,7 +660,7 @@ func (v *VaultFS) Unlink(name string, ctx *fuse.Context) fuse.Status {
 	name = cleanPath(name)
 	// arquivo em voo: marca órfão e remove tmp (Release não importará)
 	if p := v.getPending(name); p != nil {
-		p.orphan = true
+		p.orphan.Store(true)
 		os.Remove(p.tmp)
 		v.removeMeta(p.tmp)
 		return fuse.OK
@@ -693,11 +696,11 @@ func (v *VaultFS) importPendingUnder(dir string) {
 		if name != dir && !strings.HasPrefix(name, prefix) {
 			continue
 		}
-		if p.orphan {
+		if p.orphan.Load() {
 			v.dropPending(name)
 			continue
 		}
-		if !p.imported {
+		if !p.imported.Load() {
 			v.importPending(name, p)
 		}
 		v.dropPending(name)
@@ -732,10 +735,10 @@ func (v *VaultFS) Rename(oldName, newName string, ctx *fuse.Context) fuse.Status
 		return fuse.EPERM
 	}
 	// pendente e já fechado: importa antes de renomear (o dado precisa existir)
-	if p := v.getPending(oldName); p != nil && !p.orphan {
+	if p := v.getPending(oldName); p != nil && !p.orphan.Load() {
 		v.importPending(oldName, p)
 		v.dropPending(oldName)
-	} else if p != nil && p.orphan {
+	} else if p != nil && p.orphan.Load() {
 		return fuse.ENOENT
 	}
 	oldIsArch := strings.HasPrefix(oldName, vault.ArchiveRoot+"/")
@@ -809,7 +812,7 @@ func (v *VaultFS) OpenDir(name string, ctx *fuse.Context) ([]fuse.DirEntry, fuse
 	name = cleanPath(name)
 	prefix := strings.TrimSuffix(name, "/") + "/"
 	for pname, p := range v.pendingSnapshot() {
-		if p.orphan || p.imported {
+		if p.orphan.Load() || p.imported.Load() {
 			continue
 		}
 		if strings.HasPrefix(pname, prefix) && !strings.Contains(strings.TrimPrefix(pname, prefix), "/") {
