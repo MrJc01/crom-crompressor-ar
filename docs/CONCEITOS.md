@@ -181,6 +181,27 @@ O depósito já tem o que falta: nomes universais (SHA-256) e dicionário que cr
 
   Não precisa de cérebro igual dos dois lados: precisa só saber o que o outro tem.
 
+### Precisa ser um cérebro que só cresce? (pergunta do usuário, 06/11)
+
+Não. O que precisa é: **o nome de um bloco nunca muda** e **um bloco só sai quando nenhum arquivo o usa**.
+"Só cresce" é uma forma de garantir isso quando o nome é um número; com nome por hash, não precisa.
+
+| Jeito | Como | Custo |
+|---|---|---|
+| Nome por hash (o depósito) | bloco chamado pelo SHA-256; GC apaga só o que ninguém usa | 32 bytes por referência no disco |
+| Cérebro que só cresce | entrada nova no fim, nenhuma muda de número | cresce para sempre; a "assinatura" do cérebro muda a cada acréscimo |
+| Versões do cérebro | cada `.crom` grava qual versão usou; versões antigas guardadas | guardar todas as versões |
+| Tabela de tradução | retreina e grava "número velho → número novo" | uma tabela por retreino |
+| Recomprimir tudo | retreina e refaz todos os `.crom` | CPU e disco a cada retreino; as duas pontas da rede juntas |
+
+O que impede hoje no motor: o `train --update` re-escolhe as entradas (números mudam, entradas saem); a
+prova de cérebro na rede usa o hash do cérebro inteiro (qualquer acréscimo vira "outro cérebro"); o cérebro
+é carregado na RAM (não cresce para gigabytes); e o zstd só usa os 32 MB finais como dicionário.
+
+Por que o motor usa número: é curto (2 a 4 bytes contra 32 do hash), e isso importa na rede. Proposta
+híbrida: **no disco, hash** (o depósito é o cérebro, cresce e diminui sem quebrar nada); **na rede, número
+combinado na hora** — as duas pontas numeram a lista de hashes que ambas têm e trocam só os números curtos.
+
 ---
 
 ## 7. Segurança na rede
