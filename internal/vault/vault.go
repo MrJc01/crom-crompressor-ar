@@ -90,6 +90,14 @@ type Store struct {
 
 	blocksMu sync.Mutex
 	blocks   *store.Store // depósito de blocos (aberto sob demanda)
+
+	// Lote do depósito aberto por um Add de pasta (sob s.mu). Quem gravar
+	// pelo cofre enquanto ele existe usa o mesmo lote (senão o lote, que
+	// segura o depósito, e quem segura s.mu esperariam um pelo outro).
+	activeBatch *store.Batch
+	batchPend   []batchItem
+
+	byID map[string]*Entry // primeira entrada de cada conteúdo (cache; sob dataMu)
 }
 
 // appendEntry insere entrada com proteção de leitores (painel/FUSE na mesma
@@ -101,6 +109,11 @@ func (s *Store) appendEntry(e *Entry) {
 	}
 	s.dirty[e.UID] = true
 	s.Man.Entries = append(s.Man.Entries, e)
+	if s.byID != nil {
+		if _, ok := s.byID[e.ID]; !ok {
+			s.byID[e.ID] = e
+		}
+	}
 	s.dataMu.Unlock()
 }
 
@@ -122,6 +135,7 @@ func (s *Store) setEntries(keep []*Entry) {
 		s.deleted[uid] = true
 	}
 	s.Man.Entries = keep
+	s.byID = nil
 	s.dataMu.Unlock()
 }
 
@@ -545,6 +559,7 @@ func (s *Store) mergeExternal() {
 		}
 	}
 	s.Man.Entries = merged
+	s.byID = nil
 
 	// pastas: disco − deletedFolders ∪ dirtyFolders
 	have := map[string]bool{}

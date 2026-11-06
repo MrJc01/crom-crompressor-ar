@@ -363,3 +363,66 @@ func TestCDCDeterministico(t *testing.T) {
 		t.Fatalf("média dos blocos %d longe de %d", avg, AvgChunk)
 	}
 }
+
+// Lote: arquivos pequenos dividem frames (comprimem juntos), conteúdo só
+// aparece para outro processo depois do Close, e repetição dentro do lote
+// não grava duas vezes.
+func TestLoteArquivosPequenos(t *testing.T) {
+	dir := t.TempDir()
+	s := openT(t, dir)
+	b, err := s.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hs []Hash
+	var datas [][]byte
+	var raw int
+	for i := 0; i < 400; i++ {
+		d := textData(int64(i), 3000+i)
+		r, err := b.Put(bytes.NewReader(d))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hs, datas = append(hs, r.Hash), append(datas, d)
+		raw += len(d)
+	}
+	again, _ := b.Put(bytes.NewReader(datas[7]))
+	if !again.Existed || again.NewChunks != 0 {
+		t.Fatalf("repetição no lote gravou de novo: %+v", again)
+	}
+	other := openT(t, dir)
+	if other.Has(hs[0]) {
+		t.Fatal("outro processo viu conteúdo antes do commit")
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for i, h := range hs {
+		if !bytes.Equal(readAll(t, other, h), datas[i]) {
+			t.Fatalf("conteúdo %d ilegível depois do commit", i)
+		}
+	}
+	// compara com 400 Puts separados (cada arquivo comprimido sozinho)
+	s2 := openT(t, t.TempDir())
+	for _, d := range datas {
+		put(t, s2, d)
+	}
+	st1, _ := s.Stats()
+	st2, _ := s2.Stats()
+	if st1.DiskBytes >= st2.DiskBytes {
+		t.Fatalf("lote não comprimiu melhor que arquivos sozinhos: %d vs %d", st1.DiskBytes, st2.DiskBytes)
+	}
+	t.Logf("400 arquivos pequenos (%d B): lote %d B, separados %d B", raw, st1.DiskBytes, st2.DiskBytes)
+}
+
+func TestLoteAbortNaoDeixaReceita(t *testing.T) {
+	dir := t.TempDir()
+	s := openT(t, dir)
+	b, _ := s.Begin()
+	r, _ := b.Put(bytes.NewReader(textData(1, 100<<10)))
+	b.Abort()
+	if s.Has(r.Hash) {
+		t.Fatal("abort deixou o conteúdo visível")
+	}
+	put(t, s, textData(2, 10<<10)) // depósito continua utilizável
+}

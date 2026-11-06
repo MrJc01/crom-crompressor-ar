@@ -22,7 +22,9 @@ type AddOptions struct {
 	ForceTrain bool   // retreinar o codebook do cofre a partir da origem
 	NoBrain    bool   // expert: empacotar sem codebook
 	Legacy     bool   // gravar como .crom do crompressor em vez do depósito de blocos
-	Mode       uint32 // permissões a gravar (0 = derivar do arquivo fonte)
+
+	batched bool   // parte de um Add de pasta: a entrada só entra no manifest no commit do lote
+	Mode    uint32 // permissões a gravar (0 = derivar do arquivo fonte)
 }
 
 // ImportResult resume a importação de um arquivo.
@@ -42,6 +44,13 @@ func (s *Store) Add(src string, opt AddOptions) ([]ImportResult, error) {
 	}
 	base := filepath.Base(src)
 
+	if info.IsDir() && !opt.usesCrom() {
+		if err := s.beginBatch(); err != nil {
+			return nil, err
+		}
+		opt.batched = true
+		defer s.abortBatch() // sem efeito se o lote já foi fechado
+	}
 	if opt.usesCrom() {
 		if err := s.resolveBrain(src, &opt); err != nil {
 			return nil, err
@@ -79,6 +88,12 @@ func (s *Store) Add(src string, opt AddOptions) ([]ImportResult, error) {
 			return nil, aerr
 		}
 		results = append(results, r)
+	}
+	if opt.batched {
+		var err error
+		if results, err = s.finishBatch(results); err != nil {
+			return results, err
+		}
 	}
 	if err := s.Save(); err != nil {
 		return results, err
@@ -196,15 +211,9 @@ func (s *Store) addFile(src, group, rel string, isDir bool, opt AddOptions) (Imp
 	defer s.mu.Unlock()
 
 	// Dedup por conteúdo: .crom já existe, registra entrada apontando para ele.
-	var refEntry *Entry
-	for _, e := range s.Man.Entries {
-		if e.ID == hash {
-			if e.SourcePath == src && e.Group == group && e.RelPath == rel {
-				return ImportResult{Entry: e, Dedup: true, Msg: "já importado"}, nil
-			}
-			refEntry = e
-			break
-		}
+	refEntry := s.entryByID(hash)
+	if refEntry != nil && refEntry.SourcePath == src && refEntry.Group == group && refEntry.RelPath == rel {
+		return ImportResult{Entry: refEntry, Dedup: true, Msg: "já importado"}, nil
 	}
 	if refEntry != nil || s.HasContent(hash) {
 		var e *Entry
@@ -226,7 +235,11 @@ func (s *Store) addFile(src, group, rel string, isDir bool, opt AddOptions) (Imp
 			e = s.newEntry(hash, src, group, rel, isDir, size, cromName, cromSize, opt.Brain, opt)
 		}
 		e.Verified = true
-		s.appendEntry(e)
+		if opt.batched {
+			s.batchPend = append(s.batchPend, batchItem{e: e})
+		} else {
+			s.appendEntry(e)
+		}
 		msg := "dedup: .crom já no cofre"
 		if refEntry == nil {
 			msg = "dedup: conteúdo idêntico já importado"
@@ -234,6 +247,9 @@ func (s *Store) addFile(src, group, rel string, isDir bool, opt AddOptions) (Imp
 		return ImportResult{Entry: e, Dedup: true, Msg: msg}, nil
 	}
 
+	if !opt.usesCrom() && s.activeBatch != nil {
+		return s.addToBatch(src, hash, group, rel, isDir, size, opt)
+	}
 	if !opt.usesCrom() {
 		res, err := s.putBlocks(src, hash, !opt.NoVerify)
 		if err != nil {

@@ -25,6 +25,7 @@ import (
 	"syscall"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sys/unix"
 )
 
 // Options ajusta o depósito. Zero = padrão.
@@ -63,6 +64,7 @@ type Store struct {
 	wmu    sync.Mutex   // um escritor por vez neste processo (entre processos: flock)
 	mu     sync.RWMutex // protege idx/idxOff/idxIno
 	idx    map[Hash]loc
+	pend   map[Hash]*Recipe // receitas de um lote aberto, ainda não commitadas
 	idxOff int64
 	idxIno uint64
 
@@ -100,7 +102,7 @@ func Open(dir string, opt Options) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, opt: opt, idx: map[Hash]loc{}, segs: map[uint32]*os.File{},
+	s := &Store{dir: dir, opt: opt, idx: map[Hash]loc{}, pend: map[Hash]*Recipe{}, segs: map[uint32]*os.File{},
 		cache: newFrameCache(opt.CacheBytes), enc: enc, fast: fast, dec: dec}
 	// limpa receitas temporárias de uma gravação interrompida
 	if tmps, _ := filepath.Glob(filepath.Join(dir, "recipes", "*", "*.tmp")); len(tmps) > 0 {
@@ -310,6 +312,14 @@ func (w *segWriter) writeFrame(codec byte, rawLen int, data []byte) (uint32, uin
 	return w.id, uint64(off), nil
 }
 
+func (w *segWriter) sync() error {
+	if w.f == nil || !w.dirty {
+		return nil
+	}
+	w.dirty = false
+	return w.f.Sync()
+}
+
 func (w *segWriter) close() error {
 	if w.f == nil {
 		return nil
@@ -431,12 +441,24 @@ func (s *Store) recipePath(h Hash) string {
 
 // Has diz se o conteúdo h já está no depósito.
 func (s *Store) Has(h Hash) bool {
+	s.mu.RLock()
+	_, ok := s.pend[h]
+	s.mu.RUnlock()
+	if ok {
+		return true
+	}
 	_, err := os.Stat(s.recipePath(h))
 	return err == nil
 }
 
 // Recipe lê a receita do conteúdo h.
 func (s *Store) Recipe(h Hash) (*Recipe, error) {
+	s.mu.RLock()
+	r, ok := s.pend[h]
+	s.mu.RUnlock()
+	if ok {
+		return r, nil
+	}
 	b, err := os.ReadFile(s.recipePath(h))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -481,14 +503,15 @@ func (s *Store) Remove(h Hash) error {
 
 // ---------------------------------------------------------------- gravação
 
-// PutResult descreve uma gravação.
+// PutResult descreve uma gravação. Num lote, StoredDisk só fica completo
+// depois do Commit/Close (os frames juntam blocos de vários arquivos).
 type PutResult struct {
 	Hash       Hash  // SHA-256 do conteúdo inteiro
 	Size       int64 // bytes originais
 	Chunks     int   // blocos na receita
 	NewChunks  int   // blocos que ainda não existiam
 	NewBytes   int64 // bytes crus desses blocos
-	StoredDisk int64 // bytes que entraram em disco (frames + índice + receita)
+	StoredDisk int64 // bytes que esta gravação acrescentou ao disco (estimado por frame)
 	RawFrames  int   // frames guardados crus (não comprimiam)
 	Existed    bool  // o conteúdo inteiro já estava no depósito
 }
@@ -498,14 +521,20 @@ type pendChunk struct {
 	off, n uint32
 }
 
-type frameJob struct {
-	raw    []byte
-	chunks []pendChunk
-	codec  byte
-	data   []byte
+type contrib struct {
+	r   *PutResult
+	raw int
 }
 
-// PutFile grava o arquivo em path.
+type frameJob struct {
+	raw     []byte
+	chunks  []pendChunk
+	contrib []contrib
+	codec   byte
+	data    []byte
+}
+
+// PutFile grava o arquivo em path (lote de um arquivo só).
 func (s *Store) PutFile(path string) (PutResult, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -515,71 +544,85 @@ func (s *Store) PutFile(path string) (PutResult, error) {
 	return s.Put(f)
 }
 
-// Put lê r até o fim e grava o conteúdo no depósito.
-func (s *Store) Put(r io.Reader) (res PutResult, err error) {
+// Put lê r até o fim e grava o conteúdo no depósito (lote de um arquivo só).
+func (s *Store) Put(r io.Reader) (PutResult, error) {
+	b, err := s.Begin()
+	if err != nil {
+		return PutResult{}, err
+	}
+	res, err := b.Put(r)
+	if err != nil {
+		b.Abort()
+		return PutResult{}, err
+	}
+	if err := b.Close(); err != nil {
+		return PutResult{}, err
+	}
+	return *res, nil
+}
+
+// Batch grava muitos conteúdos de uma vez: os frames juntam blocos de vários
+// arquivos (arquivos pequenos comprimem como num arquivo sólido), a
+// compressão roda em paralelo entre arquivos e o disco é sincronizado uma vez
+// por lote em vez de 3–4 fsync por arquivo. Ordem garantida no Commit:
+// blocos no disco → índice no disco → receitas. Um conteúdo só existe para
+// outros processos depois do Commit; antes disso, Has/Recipe o veem neste
+// processo, mas os blocos podem ainda não ser legíveis.
+type Batch struct {
+	s       *Store
+	lk      *os.File
+	w       *segWriter
+	frame   []byte
+	fchunks []pendChunk
+	fcont   []contrib
+	jobs    []*frameJob
+	pending map[Hash]bool // blocos esperando no frame/jobs (ainda fora do índice)
+	recs    []byte        // registros de índice ainda fora do index.log
+	recipes []*Recipe     // receitas esperando o Commit
+	results []*PutResult
+	dirty   int64 // bytes crus desde o último Commit
+	done    bool
+}
+
+// Limites do lote antes de um Commit automático.
+const (
+	batchMaxBytes   = 1 << 30
+	batchMaxRecipes = 5000
+)
+
+// Begin abre um lote. Enquanto aberto, outros escritores esperam.
+func (s *Store) Begin() (*Batch, error) {
 	s.wmu.Lock()
-	defer s.wmu.Unlock()
 	lk, err := s.flock()
 	if err != nil {
-		return res, err
+		s.wmu.Unlock()
+		return nil, err
 	}
-	defer funlock(lk)
 	s.mu.Lock()
 	err = s.refreshLocked(true)
 	s.mu.Unlock()
 	if err != nil {
-		return res, err
+		funlock(lk)
+		s.wmu.Unlock()
+		return nil, err
 	}
 	w, err := s.openSegWriter(false)
 	if err != nil {
-		return res, err
+		funlock(lk)
+		s.wmu.Unlock()
+		return nil, err
 	}
-	defer w.close()
+	return &Batch{s: s, lk: lk, w: w, pending: map[Hash]bool{},
+		frame: make([]byte, 0, s.opt.FrameSize+MaxChunk)}, nil
+}
 
-	var (
-		total   = sha256.New()
-		recipe  Recipe
-		pending = map[Hash]bool{}
-		frame   = make([]byte, 0, s.opt.FrameSize+MaxChunk)
-		fchunks []pendChunk
-		batch   []*frameJob
-		newRecs []byte
-	)
-	flushBatch := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		s.compressBatch(batch)
-		for _, j := range batch {
-			seg, off, err := w.writeFrame(j.codec, len(j.raw), j.data)
-			if err != nil {
-				return err
-			}
-			if j.codec == codecRaw {
-				res.RawFrames++
-			}
-			res.StoredDisk += int64(frameHdrLen + len(j.data) + frameTailLen)
-			for _, c := range j.chunks {
-				l := loc{seg: seg, frameOff: off, offInFrame: c.off, length: c.n}
-				newRecs = append(newRecs, encodeIdx(c.h, l)...)
-			}
-		}
-		batch = batch[:0]
-		return nil
-	}
-	cutFrame := func() error {
-		if len(frame) == 0 {
-			return nil
-		}
-		batch = append(batch, &frameJob{raw: frame, chunks: fchunks})
-		frame = make([]byte, 0, s.opt.FrameSize+MaxChunk)
-		fchunks = nil
-		if len(batch) >= s.opt.Workers {
-			return flushBatch()
-		}
-		return nil
-	}
-
+// Put corta, deduplica e enfileira o conteúdo de r.
+func (b *Batch) Put(r io.Reader) (*PutResult, error) {
+	s := b.s
+	res := &PutResult{}
+	b.results = append(b.results, res)
+	total := sha256.New()
+	recipe := &Recipe{}
 	ch := newChunker(r)
 	for {
 		c, err := ch.next()
@@ -587,65 +630,189 @@ func (s *Store) Put(r io.Reader) (res PutResult, err error) {
 			break
 		}
 		if err != nil {
-			return res, err
+			return nil, err
 		}
 		total.Write(c)
 		h := Hash(sha256.Sum256(c))
 		recipe.Chunks = append(recipe.Chunks, RecipeChunk{Hash: h, Len: uint32(len(c))})
 		recipe.Size += int64(len(c))
-		if pending[h] || s.known(h) {
+		if b.pending[h] || s.known(h) {
 			continue
 		}
-		pending[h] = true
+		b.pending[h] = true
 		res.NewChunks++
 		res.NewBytes += int64(len(c))
-		fchunks = append(fchunks, pendChunk{h: h, off: uint32(len(frame)), n: uint32(len(c))})
-		frame = append(frame, c...)
-		if len(frame) >= s.opt.FrameSize {
-			if err := cutFrame(); err != nil {
-				return res, err
+		b.fchunks = append(b.fchunks, pendChunk{h: h, off: uint32(len(b.frame)), n: uint32(len(c))})
+		if n := len(b.fcont); n > 0 && b.fcont[n-1].r == res {
+			b.fcont[n-1].raw += len(c)
+		} else {
+			b.fcont = append(b.fcont, contrib{r: res, raw: len(c)})
+		}
+		b.frame = append(b.frame, c...)
+		b.dirty += int64(len(c))
+		if len(b.frame) >= s.opt.FrameSize {
+			if err := b.cutFrame(); err != nil {
+				return nil, err
 			}
 		}
 	}
-	if err := cutFrame(); err != nil {
-		return res, err
-	}
-	if err := flushBatch(); err != nil {
-		return res, err
-	}
 	copy(recipe.Hash[:], total.Sum(nil))
 	res.Hash, res.Size, res.Chunks = recipe.Hash, recipe.Size, len(recipe.Chunks)
-
-	// 1) blocos no disco  2) índice no disco  3) receita: só então o conteúdo existe
-	if err := w.close(); err != nil {
-		return res, err
-	}
-	if len(newRecs) > 0 {
-		if err := s.appendIndex(newRecs); err != nil {
-			return res, err
-		}
-		s.mu.Lock()
-		err := s.refreshLocked(true) // lê o que acabou de gravar (mesmo caminho dos outros processos)
-		s.mu.Unlock()
-		if err != nil {
-			return res, err
-		}
-		res.StoredDisk += int64(len(newRecs))
-	}
 	if s.Has(recipe.Hash) {
 		res.Existed = true
-		return res, nil
+	} else {
+		b.recipes = append(b.recipes, recipe)
+		s.mu.Lock()
+		s.pend[recipe.Hash] = recipe
+		s.mu.Unlock()
+		res.StoredDisk += int64(20 + 36*len(recipe.Chunks) + 4)
 	}
-	enc := encodeRecipe(&recipe)
-	p := s.recipePath(recipe.Hash)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return res, err
+	if b.dirty >= batchMaxBytes || len(b.recipes) >= batchMaxRecipes {
+		if err := b.Commit(); err != nil {
+			return nil, err
+		}
 	}
-	if err := writeFileSync(p, enc); err != nil {
-		return res, err
-	}
-	res.StoredDisk += int64(len(enc))
 	return res, nil
+}
+
+func (b *Batch) cutFrame() error {
+	if len(b.frame) == 0 {
+		return nil
+	}
+	b.jobs = append(b.jobs, &frameJob{raw: b.frame, chunks: b.fchunks, contrib: b.fcont})
+	b.frame = make([]byte, 0, b.s.opt.FrameSize+MaxChunk)
+	b.fchunks, b.fcont = nil, nil
+	if len(b.jobs) >= b.s.opt.Workers {
+		return b.writeJobs()
+	}
+	return nil
+}
+
+func (b *Batch) writeJobs() error {
+	if len(b.jobs) == 0 {
+		return nil
+	}
+	s := b.s
+	s.compressBatch(b.jobs)
+	for _, j := range b.jobs {
+		seg, off, err := b.w.writeFrame(j.codec, len(j.raw), j.data)
+		if err != nil {
+			return err
+		}
+		disk := frameHdrLen + len(j.data) + frameTailLen
+		disk += idxRecLen * len(j.chunks)
+		for _, c := range j.contrib {
+			c.r.StoredDisk += int64(disk) * int64(c.raw) / int64(len(j.raw))
+			if j.codec == codecRaw {
+				c.r.RawFrames++
+			}
+		}
+		for _, c := range j.chunks {
+			l := loc{seg: seg, frameOff: off, offInFrame: c.off, length: c.n}
+			b.recs = append(b.recs, encodeIdx(c.h, l)...)
+		}
+	}
+	b.jobs = b.jobs[:0]
+	return nil
+}
+
+// Commit torna duráveis e visíveis os conteúdos gravados até aqui.
+func (b *Batch) Commit() error {
+	s := b.s
+	if err := b.cutFrame(); err != nil {
+		return err
+	}
+	if err := b.writeJobs(); err != nil {
+		return err
+	}
+	if len(b.recs) == 0 && len(b.recipes) == 0 {
+		return nil
+	}
+	// 1) blocos no disco
+	if err := b.w.sync(); err != nil {
+		return err
+	}
+	// 2) índice no disco
+	if len(b.recs) > 0 {
+		if err := s.appendIndex(b.recs); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		err := s.refreshLocked(true)
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		b.recs = b.recs[:0]
+		for h := range b.pending {
+			delete(b.pending, h)
+		}
+	}
+	// 3) receitas: grava todas, sincroniza o sistema de arquivos uma vez, renomeia
+	if len(b.recipes) > 0 {
+		tmps := make([]string, len(b.recipes))
+		for i, r := range b.recipes {
+			p := s.recipePath(r.Hash)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				return err
+			}
+			tmps[i] = p + ".tmp"
+			if err := os.WriteFile(tmps[i], encodeRecipe(r), 0o644); err != nil {
+				return err
+			}
+		}
+		if err := s.syncFS(); err != nil {
+			return err
+		}
+		for i, r := range b.recipes {
+			if err := os.Rename(tmps[i], s.recipePath(r.Hash)); err != nil {
+				return err
+			}
+		}
+		if err := s.syncFS(); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		for _, r := range b.recipes {
+			delete(s.pend, r.Hash)
+		}
+		s.mu.Unlock()
+		b.recipes = b.recipes[:0]
+	}
+	b.dirty = 0
+	return nil
+}
+
+// Close faz o Commit final e libera o depósito para outros escritores.
+func (b *Batch) Close() error {
+	if b.done {
+		return nil
+	}
+	err := b.Commit()
+	b.release()
+	return err
+}
+
+// Abort descarta o que não foi commitado (os blocos já gravados viram lixo
+// que o GC recolhe; nenhuma receita aponta para eles).
+func (b *Batch) Abort() {
+	if b.done {
+		return
+	}
+	s := b.s
+	s.mu.Lock()
+	for _, r := range b.recipes {
+		delete(s.pend, r.Hash)
+	}
+	s.mu.Unlock()
+	b.release()
+}
+
+func (b *Batch) release() {
+	b.done = true
+	b.w.close()
+	funlock(b.lk)
+	b.s.wmu.Unlock()
 }
 
 // compressBatch comprime os frames em paralelo. Frame que não comprime
@@ -847,6 +1014,17 @@ func (s *Store) Stats() (Stats, error) {
 
 // ---------------------------------------------------------------- utilidades
 
+// syncFS sincroniza o sistema de arquivos do depósito (uma chamada no lugar
+// de um fsync por arquivo).
+func (s *Store) syncFS() error {
+	d, err := os.Open(s.dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return unix.Syncfs(int(d.Fd()))
+}
+
 func writeFileSync(path string, data []byte) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
@@ -880,4 +1058,23 @@ func syncDir(dir string) error {
 	}
 	defer d.Close()
 	return d.Sync()
+}
+
+// Remove apaga a receita de h usando a trava que o lote já tem.
+func (b *Batch) Remove(h Hash) error {
+	s := b.s
+	s.mu.Lock()
+	delete(s.pend, h)
+	s.mu.Unlock()
+	for i, r := range b.recipes {
+		if r.Hash == h {
+			b.recipes = append(b.recipes[:i], b.recipes[i+1:]...)
+			break
+		}
+	}
+	err := os.Remove(s.recipePath(h))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }

@@ -148,16 +148,22 @@ func (s *Store) releaseBlocks(removed []*Entry) {
 		if err != nil {
 			continue
 		}
-		bs, err := s.Blocks()
-		if err != nil {
-			return
+		var rerr error
+		if s.activeBatch != nil { // um Add de pasta está gravando: usa o lote dele
+			rerr = s.activeBatch.Remove(h)
+		} else {
+			bs, err := s.Blocks()
+			if err != nil {
+				return
+			}
+			rerr = bs.Remove(h)
 		}
-		if bs.Remove(h) == nil {
+		if rerr == nil {
 			live[e.ID] = true // não remover duas vezes
 			gone++
 		}
 	}
-	if gone == 0 {
+	if gone == 0 || s.activeBatch != nil { // GC fica para depois do lote (doctor --prune)
 		return
 	}
 	bs, _ := s.Blocks()
@@ -253,6 +259,166 @@ func (s *Store) Grep(e *Entry, term string, max int) ([]string, error) {
 				line = line[:300] + "…"
 			}
 			out = append(out, line)
+		}
+	}
+	return out, nil
+}
+
+type batchItem struct {
+	e      *Entry
+	r      *store.PutResult // nil = dedup (nada novo gravado)
+	verify bool
+}
+
+// entryByID devolve a primeira entrada com o conteúdo hash (O(1) com cache).
+func (s *Store) entryByID(hash string) *Entry {
+	s.dataMu.Lock()
+	defer s.dataMu.Unlock()
+	if s.byID == nil {
+		s.byID = make(map[string]*Entry, len(s.Man.Entries))
+		for _, e := range s.Man.Entries {
+			if _, ok := s.byID[e.ID]; !ok {
+				s.byID[e.ID] = e
+			}
+		}
+	}
+	return s.byID[hash]
+}
+
+func (s *Store) beginBatch() error {
+	bs, err := s.Blocks()
+	if err != nil {
+		return err
+	}
+	b, err := bs.Begin()
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.activeBatch, s.batchPend = b, nil
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Store) abortBatch() {
+	s.mu.Lock()
+	b := s.activeBatch
+	s.activeBatch, s.batchPend = nil, nil
+	s.mu.Unlock()
+	if b != nil {
+		b.Abort()
+	}
+}
+
+// addToBatch grava no lote aberto. Chamado com s.mu tomado.
+func (s *Store) addToBatch(src, hash, group, rel string, isDir bool, size int64, opt AddOptions) (ImportResult, error) {
+	f, err := os.Open(src)
+	if err != nil {
+		return ImportResult{}, err
+	}
+	r, err := s.activeBatch.Put(f)
+	f.Close()
+	if err != nil {
+		return ImportResult{}, err
+	}
+	if r.Hash.String() != hash {
+		return ImportResult{}, fmt.Errorf("o arquivo mudou durante a importação (sha256 %s ≠ %s)", r.Hash.String()[:12], hash[:12])
+	}
+	e := s.newEntry(hash, src, group, rel, isDir, size, "", 0, "", opt)
+	e.Storage = StorageBlocks
+	e.PackFlags = nil
+	it := batchItem{e: e, r: r, verify: !opt.NoVerify}
+	if opt.batched {
+		s.batchPend = append(s.batchPend, it)
+		return ImportResult{Entry: e}, nil
+	}
+	// gravação de fora do Add (FUSE/painel durante um import grande):
+	// commit agora, para a entrada valer já
+	if err := s.activeBatch.Commit(); err != nil {
+		return ImportResult{}, err
+	}
+	if err := s.settleItem(&it); err != nil {
+		return ImportResult{}, err
+	}
+	s.appendEntry(e)
+	return ImportResult{Entry: e}, nil
+}
+
+// settleItem preenche os números da entrada e verifica o conteúdo relendo
+// do depósito (depois do commit).
+func (s *Store) settleItem(it *batchItem) error {
+	if it.r == nil {
+		return nil
+	}
+	it.e.CromSize = it.r.StoredDisk
+	if it.r.Chunks > 0 {
+		it.e.HitRate = 100 * float64(it.r.Chunks-it.r.NewChunks) / float64(it.r.Chunks)
+	}
+	if !it.verify {
+		return nil
+	}
+	h, err := store.ParseHash(it.e.ID)
+	if err != nil {
+		return err
+	}
+	bs, err := s.Blocks()
+	if err != nil {
+		return err
+	}
+	if err := bs.Verify(h); err != nil {
+		return fmt.Errorf("verificação lossless falhou: %v", err)
+	}
+	it.e.Verified = true
+	return nil
+}
+
+// finishBatch faz o commit do lote do Add, verifica cada conteúdo novo e só
+// então registra as entradas no manifest.
+func (s *Store) finishBatch(results []ImportResult) ([]ImportResult, error) {
+	s.mu.Lock()
+	b, pend := s.activeBatch, s.batchPend
+	s.activeBatch, s.batchPend = nil, nil
+	s.mu.Unlock()
+	if b == nil {
+		return results, nil
+	}
+	if err := b.Close(); err != nil {
+		return nil, fmt.Errorf("gravar o lote no depósito: %w", err)
+	}
+	bad := map[*Entry]bool{}
+	checked := map[string]error{}
+	for i := range pend {
+		it := &pend[i]
+		if it.r == nil {
+			continue
+		}
+		if err, ok := checked[it.e.ID]; ok { // mesmo conteúdo já verificado
+			it.verify = false
+			if err != nil {
+				bad[it.e] = true
+				continue
+			}
+		}
+		err := s.settleItem(it)
+		checked[it.e.ID] = err
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "! %s: %v\n", it.e.RelPath, err)
+			bad[it.e] = true
+		} else if !it.verify && !it.e.Verified {
+			it.e.Verified = checked[it.e.ID] == nil
+		}
+	}
+	s.mu.Lock()
+	for _, it := range pend {
+		if !bad[it.e] {
+			s.appendEntry(it.e)
+		}
+	}
+	s.mu.Unlock()
+	out := results[:0]
+	for _, r := range results {
+		if !bad[r.Entry] {
+			out = append(out, r)
 		}
 	}
 	return out, nil
