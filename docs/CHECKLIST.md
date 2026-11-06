@@ -23,31 +23,31 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 1. [x] **D1 — onde ficam os blocos: depósito próprio do cofre** (decidido pelo usuário em 05/11). Adendo do usuário: "o crompressor é só a base do nosso sistema cromar". O depósito nasce no crom-ar; o crompressor segue como base (`.cromar`, sincronização, cérebro), e o que ficar genérico pode subir para o motor depois.
 
 *Fase 0 — motor certo e medição honesta*
-2. [ ] `make build` compila o motor a partir do fonte `../crompressor` (e não copia o binário velho).
+2. [x] `make build` compila o motor a partir do fonte `../crompressor` — commit `3bb1e88`.
 3. [ ] `doctor` avisa quando o motor do cofre é antigo.
-4. [ ] `stats` e painel contam `brains/`, `spool/`, índices e manifest no disco.
-5. [ ] `tests/bench_real.sh` + `tests/BENCH.md`: dados reais vs. zstd e tar+zstd --long.
-6. [ ] Corrigir o DIAGNOSTICO com o resultado do motor compilado do fonte.
+4. [ ] parcial: `stats` mostra o DISCO REAL (depósito + .crom + codebooks + manifest; spool à parte). Falta o painel web.
+5. [x] `tests/bench_real.sh` + `tests/BENCH.md` (livros, bancos, versões, vídeos; roundtrip 52/52).
+6. [x] DIAGNOSTICO corrigido com o motor compilado do fonte.
 
 *Fase 1 — formato do depósito (`internal/store`)*
-7. [ ] FastCDC (4/16/64 KB) + hash de 32 bytes por bloco.
-8. [ ] Segmentos append-only de ~1 MB em zstd, checksum por frame.
-9. [ ] Índice hash → posição em disco (sem exigir tudo na RAM).
-10. [ ] Receita do arquivo (lista de blocos), pela SHA-256 do arquivo.
-11. [ ] Referências por bloco + GC/compactação de segmentos (`doctor --prune`).
-12. [ ] Durabilidade: tmp + fsync + rename + journal; import interrompido não corrompe.
-13. [ ] Versão do formato no cabeçalho.
+7. [x] FastCDC 4/16/64 KB + SHA-256 por bloco (`internal/store/cdc.go`). Testado: 4 KB médio só melhora 6% nas versões; ficou 16 KB.
+8. [x] Segmentos append-only (256 MB), frames de 1 MiB em zstd, CRC32C por frame (`format.go`, `store.go`).
+9. [ ] parcial: `index.log` append-only em disco, mas carregado num mapa em RAM (~100 B por bloco ≈ 650 MB para 100 GB). Falta índice paginado (bbolt ou ordenado em disco).
+10. [x] Receita por SHA-256 do conteúdo, com CRC (`recipes/ab/<sha>.rcp`).
+11. [x] GC por marcação a partir das receitas; roda sozinho ao remover (segmentos ≥30% mortos) e em `doctor --prune`; `doctor` conta blocos órfãos sem apagar.
+12. [x] Ordem blocos → índice → receita, com fsync; índice cortado por queda é truncado; GC por rename atômico. Testes: índice cortado, frame corrompido, receita corrompida. Falta o teste de `kill -9` real (item 36).
+13. [x] `store/FORMAT` + versão na receita + magic nos frames.
 
 *Fase 2 — importar, extrair, verificar*
-14. [ ] `add` em streaming com verificação SHA-256 antes de confirmar.
-15. [ ] Detecção por tipo: texto/SQL/código → zstd alto; já comprimido (mp4, jpg, zip…) → só dedup, sem zstd; aleatório → cru.
+14. [x] `add` em streaming (sem carregar o arquivo), verifica bloco a bloco + SHA-256 antes de registrar. `--crom` mantém o formato antigo.
+15. [x] Por frame, sem depender da extensão: amostra rápida + zstd; frame que não comprime (mp4, jpg, zip, aleatório) fica cru. Medido: vídeos 44,5 MB → 31,9 MB (cópia idêntica de graça).
 16. [ ] SQLite: comparar corte em páginas de 4 KB contra CDC.
-17. [ ] `extract`, `verify`, `info`, `rm` pelo depósito.
-18. [ ] Concorrência: imports paralelos e CLI + residente com lock no depósito.
+17. [x] `extract`, `verify`, `info`, `rm`, `doctor`, export `.cromar` e `grep` do painel (grep completo, lendo o conteúdo) pelo depósito.
+18. [ ] parcial: flock entre processos + trava de escrita separada da leitura (ler pelo FUSE não espera import). Testado com duas instâncias e `-race`. Falta comprimir arquivos pequenos em paralelo (hoje ~6 MB/s em textos).
 
 *Fase 3 — leitura sob demanda*
-19. [ ] FUSE `Read(offset, n)` só descomprime os frames do trecho, com cache LRU em RAM.
-20. [ ] Remover o `spool/` da leitura (escrita continua em tmp até o RELEASE).
+19. [x] FUSE lê pelo `ReadAt` do depósito, cache LRU de 64 MB. Testado chamando o filesystem direto (sem montar): `internal/fusefs/blocks_test.go`. Falta testar montado (item 33).
+20. [x] Leitura não usa mais o `spool/`, e o arquivo escrito pela montagem não fica mais duplicado no `spool/` depois de importar. `Truncate` não altera mais o conteúdo compartilhado (bug antigo, com teste).
 21. [ ] Vídeo tocando direto da montagem com avanço/retrocesso (mpv/VLC).
 22. [ ] Apps executando do cofre; SQLite aberto direto do cofre (somente leitura).
 
@@ -60,7 +60,7 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 26. [ ] `crom-ar migrate` com backup antes e SHA-256 por entrada (cofre real: 187 entradas, 6,9 MB).
 
 *Fase 6 — ecossistema CROM*
-27. [ ] `.cromar` com o crompressor (cérebro embutido ou treinado do pacote), roundtrip conferido.
+27. [x] `.cromar` sem codebook no cofre treina um com o próprio pacote (`-k 4096`); roundtrip conferido (`bundle_test.go`). **Bug corrigido:** o `cd import` usava `Fuzziness>0` e trocava trechos entre arquivos (decodificação com perda do motor); agora confere o SHA-256 de cada membro.
 28. [ ] Sincronizar dois cofres só com os blocos que faltam; medir depósito vs. `daemon`/`pull`.
 29. [ ] Revisar `brain`, `bench` e `edge`/esqueleto com o depósito: manter, adaptar ou remover.
 
@@ -69,11 +69,17 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 31. [ ] README reescrito sem as regras do V24.
 
 *Fase 8 — testes e aceite*
-32. [ ] Unitários do depósito com `-race` (corte, índice, GC, falha no meio, concorrência).
+32. [x] 14 testes do depósito + 4 do FUSE sem montar + 1 do `.cromar`, todos com `-race`.
 33. [ ] `tests/suite.sh` adaptada; rodar num terminal do sistema (FUSE não monta de dentro do app Claude).
 34. [ ] `bench_real.sh` batendo as metas da tabela do PLANO.
 35. [ ] Escala: 10 GB variados, 1 arquivo de 5 GB, 100 mil arquivos.
 36. [ ] Durabilidade: `kill -9` no import e no GC, depois `doctor` limpo e SHA-256 ok.
+
+*Novos itens (06/11)*
+37. [ ] `fsync` em lote no `add` de pasta (hoje 3–4 fsync por arquivo; em disco ocupado, o import de 95 MB levou 64 s com 5 s de CPU).
+38. [ ] Blocos **parecidos** ("hash + diferença"): comprimir o bloco novo usando o parecido como dicionário. Fecharia a diferença para o tar+zstd --long nas versões (11,15 MB vs 7,53 MB).
+39. [ ] Criptografia no depósito (hoje `--encrypt` cai no formato `.crom`).
+40. [ ] Atualizar `tests/suite.sh` para o depósito e rodar num terminal do sistema; as 27 falhas daqui são todas de FUSE (66 ✔ / 27 ✘, igual antes e depois).
 
 **Futuro (só anotado)**
 - Vídeo entre arquivos diferentes: só com quadros decodificados (pendência do motor). Hoje o ganho em vídeo vem de cópias e trechos idênticos.
@@ -81,8 +87,8 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 
 ## ▶️ Retomar
 
-1. Responder a D1 (item 1). Sem ela a fase 1 não começa.
-2. Fase 0 primeiro: motor compilado do fonte + `bench_real.sh`, para medir cada passo.
+1. Feito até aqui: fases 0, 1 e 2 e a leitura sob demanda (fase 3), na branch `deposito-blocos`.
+2. Próximo: rodar `tests/suite.sh` num terminal do sistema (FUSE), depois a migração do cofre real (item 26), e então os itens 37, 18 e 9.
 3. Dados de teste: `tests/bench_real.sh` vai baixá-los. Os desta sessão estavam no scratchpad e não ficam.
 4. FUSE só testa num terminal do sistema, fora do app Claude (`fusermount3: Operation not permitted`).
 5. O residente real está montado em `~/CromAr` (cofre em `~/Documentos/CromAr`): testes sempre com `CROM_AR_ROOT` temporário.

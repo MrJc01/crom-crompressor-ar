@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/MrJc01/crom-crompressor-ar/internal/store"
 	"io"
 	"os"
 	"os/exec"
@@ -45,11 +46,12 @@ type Entry struct {
 	IsDir      bool      `json:"is_dir"`
 	SourcePath string    `json:"source_path"`
 	Size       int64     `json:"size"`
-	CromFile   string    `json:"crom_file"` // nome do arquivo dentro de VaultDir
-	CromSize   int64     `json:"crom_size"`
-	Codebook   string    `json:"codebook"`       // "" = empacotado sem codebook
-	HitRate    float64   `json:"hit_rate"`       // % de chunks que caíram no codebook
-	Mode       uint32    `json:"mode,omitempty"` // permissões (0 = 0644; exec bit preservado)
+	CromFile   string    `json:"crom_file"`         // nome do arquivo dentro de VaultDir
+	CromSize   int64     `json:"crom_size"`         // bytes que esta entrada acrescentou ao disco
+	Storage    string    `json:"storage,omitempty"` // "blocks" = depósito de blocos; "" = .crom do crompressor
+	Codebook   string    `json:"codebook"`          // "" = empacotado sem codebook
+	HitRate    float64   `json:"hit_rate"`          // % de chunks que caíram no codebook
+	Mode       uint32    `json:"mode,omitempty"`    // permissões (0 = 0644; exec bit preservado)
 	PackFlags  []string  `json:"pack_flags"`
 	PackedAt   time.Time `json:"packed_at"`
 	Verified   bool      `json:"verified"`
@@ -85,6 +87,9 @@ type Store struct {
 	deletedFolders map[string]bool
 	loadedDefault  string // DefaultBrain como estava no load (detecta mudança externa)
 	cfgDirty       bool   // nós mesmos mudamos a config desde o load
+
+	blocksMu sync.Mutex
+	blocks   *store.Store // depósito de blocos (aberto sob demanda)
 }
 
 // appendEntry insere entrada com proteção de leitores (painel/FUSE na mesma
@@ -436,11 +441,13 @@ func (s *Store) CromPath(e *Entry) string {
 	return filepath.Join(s.Cfg.VaultDir, e.CromFile)
 }
 
-// HasContent informa se já existe .crom para o hash (dedup).
+// HasContent informa se o conteúdo já está no cofre (.crom ou depósito).
 func (s *Store) HasContent(hash string) bool {
 	p := filepath.Join(s.Cfg.VaultDir, hash+".crom")
-	_, err := os.Stat(p)
-	return err == nil
+	if _, err := os.Stat(p); err == nil {
+		return true
+	}
+	return s.hasBlocks(hash)
 }
 
 func loadManifest(path string) (*Manifest, error) {

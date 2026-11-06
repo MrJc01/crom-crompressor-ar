@@ -63,14 +63,6 @@ func Export(st *vault.Store, group, outPath, brainName string, edge bool) (int, 
 	if brain == "" {
 		brain = st.DefaultBrainName()
 	}
-	if brain == "" {
-		return 0, fmt.Errorf("sem codebook — rode 'crom-ar brain train' antes de exportar")
-	}
-	brainPath := st.BrainPath(brain)
-	if _, err := os.Stat(brainPath); err != nil {
-		return 0, fmt.Errorf("codebook %s não encontrado no cofre", brain)
-	}
-
 	tmp, err := os.MkdirTemp("", "crom-ar-export-*")
 	if err != nil {
 		return 0, err
@@ -87,8 +79,25 @@ func Export(st *vault.Store, group, outPath, brainName string, edge bool) (int, 
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return 0, err
 		}
-		if _, err := st.Run("unpack", "-i", st.CromPath(e), "-o", dst, "-c", brainPath); err != nil {
-			return 0, fmt.Errorf("unpack %s: %v", e.RelPath, err)
+		if err := st.MaterializeTo(e, dst); err != nil {
+			return 0, fmt.Errorf("extrair %s: %v", e.RelPath, err)
+		}
+	}
+
+	// codebook do pacote: o do cofre ou, se não houver (cofre por blocos),
+	// um treinado com os próprios membros — quem recebe o .cromar ganha o
+	// "vocabulário" do pacote para os próximos.
+	var brainPath string
+	if brain != "" {
+		brainPath = st.BrainPath(brain)
+		if _, err := os.Stat(brainPath); err != nil {
+			return 0, fmt.Errorf("codebook %s não encontrado no cofre", brain)
+		}
+	} else {
+		brain = group
+		brainPath = filepath.Join(tmp, "pacote.cromdb")
+		if _, err := st.Run("train", "-i", dirA, "-o", brainPath, "-k", "4096"); err != nil {
+			return 0, fmt.Errorf("treinar codebook do pacote: %v", err)
 		}
 	}
 
@@ -230,13 +239,26 @@ func Open(st *vault.Store, bundlePath string) (*Meta, string, error) {
 	if err := os.MkdirAll(srcDir, 0o700); err != nil {
 		return nil, "", err
 	}
+	// Lossless sempre: o motor detecta sozinho um .crom edge (cabeçalho IsLossy).
+	// Fuzziness > 0 aqui ligava o "clone variacional" do motor e trocava
+	// trechos dos arquivos (bug achado em 06/11 com livros reais).
 	uopts := cromlib.DefaultUnpackOptions()
-	uopts.Fuzziness = 0.0001 // tolera bundles edge (sem hash-check interno)
 	if err := cromlib.Unpack(contentPath, filepath.Join(cache, "bundle.tar"), brainPath, uopts); err != nil {
 		return nil, "", fmt.Errorf("unpack do pacote: %v", err)
 	}
 	if err := untar(filepath.Join(cache, "bundle.tar"), srcDir); err != nil {
 		return nil, "", err
+	}
+	if meta.Mode != "edge" {
+		for _, m := range meta.Members {
+			if m.Sha256 == "" {
+				continue
+			}
+			h, _, err := vault.SHA256File(filepath.Join(srcDir, filepath.FromSlash(m.Name)))
+			if err != nil || h != m.Sha256 {
+				return nil, "", fmt.Errorf("pacote corrompido: %s não confere com o sha256 do meta.json", m.Name)
+			}
+		}
 	}
 	return &meta, srcDir, nil
 }

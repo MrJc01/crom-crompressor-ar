@@ -117,7 +117,13 @@ func (v *VaultFS) importPending(name string, p *pendingFile) bool {
 		v.pendMu.Unlock()
 		return false
 	}
-	_ = os.Rename(p.tmp, v.spoolPath(e.ID))
+	if e.IsBlocks() {
+		// o depósito lê sob demanda: guardar a cópia crua seria ocupar o
+		// disco duas vezes
+		_ = os.Remove(p.tmp)
+	} else {
+		_ = os.Rename(p.tmp, v.spoolPath(e.ID))
+	}
 	v.pendMu.Lock()
 	p.imported = true
 	v.pendMu.Unlock()
@@ -282,6 +288,38 @@ func (v *VaultFS) spoolPath(hash string) string {
 	return filepath.Join(v.opt.SpoolDir, hash)
 }
 
+// sizedFile é um arquivo do spool com Size() (formato .crom antigo).
+type sizedFile struct {
+	*os.File
+	size int64
+}
+
+func (f sizedFile) Size() int64 { return f.size }
+
+// openContent abre o conteúdo para leitura. No depósito de blocos, lê só o
+// trecho pedido (nada vai para o disco); no .crom antigo, descomprime uma
+// vez para o spool.
+func (v *VaultFS) openContent(e *vault.Entry) (vault.Content, io.Closer, error) {
+	if e.IsBlocks() {
+		c, err := v.st.OpenBlocks(e)
+		return c, nil, err
+	}
+	sp, err := v.unpackOnce(e.ID, e.CromFile, v.brainFor(e))
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := os.Open(sp)
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return sizedFile{f, st.Size()}, f, nil
+}
+
 // unpackOnce garante o spool descomprimido do conteúdo (uma única vez por hash).
 func (v *VaultFS) unpackOnce(hash, cromFile, brain string) (string, error) {
 	v.unpackMu.Lock()
@@ -400,6 +438,8 @@ type cromFile struct {
 	fs       *VaultFS
 	name     string
 	e        *vault.Entry
+	ra       vault.Content // leitura: depósito de blocos (ReadAt sob demanda) ou spool do .crom
+	closer   io.Closer
 	sp       string
 	tmp      string
 	f        *os.File
@@ -410,16 +450,19 @@ type cromFile struct {
 func (c *cromFile) String() string { return "crom-ar:" + c.name }
 
 func (c *cromFile) Read(dest []byte, off int64) (fuse.ReadResult, fuse.Status) {
-	src := c.sp
+	var ra io.ReaderAt = c.ra
 	if c.dirty && c.tmp != "" {
-		src = c.tmp
+		fin, err := os.Open(c.tmp)
+		if err != nil {
+			return nil, fuse.EIO
+		}
+		defer fin.Close()
+		ra = fin
 	}
-	fin, err := os.Open(src)
-	if err != nil {
+	if ra == nil {
 		return nil, fuse.EIO
 	}
-	defer fin.Close()
-	n, err := fin.ReadAt(dest, off)
+	n, err := ra.ReadAt(dest, off)
 	if err != nil && err != io.EOF {
 		return nil, fuse.EIO
 	}
@@ -458,6 +501,9 @@ func (c *cromFile) Release() {
 	if c.f != nil {
 		c.f.Close()
 	}
+	if c.closer != nil {
+		c.closer.Close()
+	}
 	if p := c.fs.getPending(c.name); p != nil {
 		if st, err := os.Stat(c.tmp); err == nil {
 			p.size = st.Size()
@@ -483,8 +529,8 @@ func (c *cromFile) GetAttr(out *fuse.Attr) fuse.Status {
 		if st, err := os.Stat(c.tmp); err == nil {
 			size = st.Size()
 		}
-	} else if st, err := os.Stat(c.sp); err == nil {
-		size = st.Size()
+	} else if c.ra != nil {
+		size = c.ra.Size()
 	}
 	out.Mode = fuse.S_IFREG | 0o644
 	out.Size = uint64(size)
@@ -503,25 +549,19 @@ func (v *VaultFS) Open(name string, flags uint32, ctx *fuse.Context) (nodefs.Fil
 	acc := flags & syscall.O_ACCMODE
 	writeMode := acc != syscall.O_RDONLY
 
-	sp, err := v.unpackOnce(e.ID, e.CromFile, v.brainFor(e))
+	ra, closer, err := v.openContent(e)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "! %s: %v\n", name, err)
 		return nil, fuse.EIO
 	}
 
-	c := &cromFile{File: nodefs.NewDefaultFile(), fs: v, name: name, e: e, sp: sp}
+	c := &cromFile{File: nodefs.NewDefaultFile(), fs: v, name: name, e: e, ra: ra, closer: closer}
 	if writeMode {
 		tmp, err := os.CreateTemp(v.opt.SpoolDir, "tmp-*")
 		if err != nil {
 			return nil, fuse.EIO
 		}
-		src, err := os.Open(sp)
-		if err != nil {
-			tmp.Close()
-			return nil, fuse.EIO
-		}
-		defer src.Close()
-		if _, err := io.Copy(tmp, src); err != nil {
+		if _, err := io.Copy(tmp, io.NewSectionReader(ra, 0, ra.Size())); err != nil {
 			tmp.Close()
 			return nil, fuse.EIO
 		}
@@ -590,15 +630,22 @@ func (v *VaultFS) Truncate(name string, size uint64, ctx *fuse.Context) fuse.Sta
 	if e == nil {
 		return fuse.ENOENT
 	}
-	sp, err := v.unpackOnce(e.ID, e.CromFile, v.brainFor(e))
+	// cópia própria: truncar o spool/conteúdo compartilhado estragaria as
+	// outras entradas com o mesmo conteúdo (dedup)
+	tmp, err := os.CreateTemp(v.opt.SpoolDir, "trunc-*")
 	if err != nil {
 		return fuse.EIO
 	}
-	if err := os.Truncate(sp, int64(size)); err != nil {
+	tmp.Close()
+	defer os.Remove(tmp.Name())
+	if err := v.st.MaterializeTo(e, tmp.Name()); err != nil {
+		return fuse.EIO
+	}
+	if err := os.Truncate(tmp.Name(), int64(size)); err != nil {
 		return fuse.EIO
 	}
 	o := *v.buildImportOpts(name, e)
-	o.Src = sp
+	o.Src = tmp.Name()
 	if _, err := v.st.ImportFile(o); err != nil {
 		return fuse.EIO
 	}

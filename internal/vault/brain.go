@@ -60,8 +60,8 @@ func (s *Store) ComputeBrainStats() []BrainStat {
 		bs.Members++
 		bs.Original += e.Size
 		bs.AvgHit += e.HitRate
-		if !seen[e.CromFile] {
-			seen[e.CromFile] = true
+		if !seen[e.ContentKey()] {
+			seen[e.ContentKey()] = true
 			bs.Stored += e.CromSize
 			bs.Unique++
 		}

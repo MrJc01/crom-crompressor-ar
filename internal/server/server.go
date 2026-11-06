@@ -607,11 +607,7 @@ func (sv *Server) info(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, fmt.Errorf("entrada não encontrada"))
 		return
 	}
-	args := []string{"info", "-i", sv.Store.CromPath(e)}
-	if e.Codebook != "" {
-		args = append(args, "-c", e.Codebook)
-	}
-	out, err := sv.Store.Run(args...)
+	out, err := sv.Store.InfoText(e)
 	if err != nil {
 		out += "\n" + err.Error()
 	}
@@ -683,6 +679,17 @@ func (sv *Server) search(w http.ResponseWriter, r *http.Request) {
 	for _, e := range sv.Store.EntriesSnapshot() {
 		if scanned >= 40 {
 			break
+		}
+		if e.IsBlocks() {
+			lines, err := sv.Store.Grep(e, term, 50-len(hits))
+			if err != nil {
+				continue
+			}
+			scanned++
+			for _, l := range lines {
+				hits = append(hits, hit{Name: e.Name, Line: l})
+			}
+			continue
 		}
 		out, err := sv.Store.Run("grep", term, "-i", sv.Store.CromPath(e))
 		if err != nil {

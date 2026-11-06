@@ -3,6 +3,7 @@ package vault
 import (
 	"errors"
 	"fmt"
+	"github.com/MrJc01/crom-crompressor-ar/internal/store"
 	"io/fs"
 	"os"
 	"path"
@@ -19,7 +20,8 @@ type AddOptions struct {
 	Brain      string // codebook para pack ("" = default do cofre)
 	NoVerify   bool   // pular verificação pós-pack
 	ForceTrain bool   // retreinar o codebook do cofre a partir da origem
-	NoBrain    bool   // expert: empacotar sem codebook (não-confiável no V24)
+	NoBrain    bool   // expert: empacotar sem codebook
+	Legacy     bool   // gravar como .crom do crompressor em vez do depósito de blocos
 	Mode       uint32 // permissões a gravar (0 = derivar do arquivo fonte)
 }
 
@@ -40,8 +42,10 @@ func (s *Store) Add(src string, opt AddOptions) ([]ImportResult, error) {
 	}
 	base := filepath.Base(src)
 
-	if err := s.resolveBrain(src, &opt); err != nil {
-		return nil, err
+	if opt.usesCrom() {
+		if err := s.resolveBrain(src, &opt); err != nil {
+			return nil, err
+		}
 	}
 
 	var results []ImportResult
@@ -155,8 +159,10 @@ func (s *Store) ImportFile(o AddFileOpts) (*Entry, error) {
 	if group == "" {
 		group = name
 	}
-	if err := s.resolveBrain(src, &o.Opt); err != nil {
-		return nil, err
+	if o.Opt.usesCrom() {
+		if err := s.resolveBrain(src, &o.Opt); err != nil {
+			return nil, err
+		}
 	}
 	o.Opt.Mode = o.Mode // permissões vindas do fs (o tmp do spool é 0600)
 	target := path.Join(folder, name)
@@ -201,12 +207,24 @@ func (s *Store) addFile(src, group, rel string, isDir bool, opt AddOptions) (Imp
 		}
 	}
 	if refEntry != nil || s.HasContent(hash) {
-		cromName := hash + ".crom"
-		var cromSize int64
-		if st, err := os.Stat(filepath.Join(s.Cfg.VaultDir, cromName)); err == nil {
-			cromSize = st.Size()
+		var e *Entry
+		switch {
+		case refEntry != nil: // mesmo armazenamento da entrada que já existe
+			e = s.newEntry(hash, src, group, rel, isDir, size, refEntry.CromFile, refEntry.CromSize, refEntry.Codebook, opt)
+			e.Storage = refEntry.Storage
+			e.PackFlags = refEntry.PackFlags
+		case s.hasBlocks(hash):
+			e = s.newEntry(hash, src, group, rel, isDir, size, "", 0, "", opt)
+			e.Storage = StorageBlocks
+			e.PackFlags = nil
+		default:
+			cromName := hash + ".crom"
+			var cromSize int64
+			if st, err := os.Stat(filepath.Join(s.Cfg.VaultDir, cromName)); err == nil {
+				cromSize = st.Size()
+			}
+			e = s.newEntry(hash, src, group, rel, isDir, size, cromName, cromSize, opt.Brain, opt)
 		}
-		e := s.newEntry(hash, src, group, rel, isDir, size, cromName, cromSize, opt.Brain, opt)
 		e.Verified = true
 		s.appendEntry(e)
 		msg := "dedup: .crom já no cofre"
@@ -214,6 +232,26 @@ func (s *Store) addFile(src, group, rel string, isDir bool, opt AddOptions) (Imp
 			msg = "dedup: conteúdo idêntico já importado"
 		}
 		return ImportResult{Entry: e, Dedup: true, Msg: msg}, nil
+	}
+
+	if !opt.usesCrom() {
+		res, err := s.putBlocks(src, hash, !opt.NoVerify)
+		if err != nil {
+			return ImportResult{}, err
+		}
+		e := s.newEntry(hash, src, group, rel, isDir, size, "", res.StoredDisk, "", opt)
+		e.Storage = StorageBlocks
+		e.PackFlags = nil
+		if res.Chunks > 0 {
+			e.HitRate = 100 * float64(res.Chunks-res.NewChunks) / float64(res.Chunks) // blocos já existentes
+		}
+		e.Verified = !opt.NoVerify
+		s.appendEntry(e)
+		msg := ""
+		if res.Chunks > 0 && res.NewChunks < res.Chunks {
+			msg = fmt.Sprintf("%d de %d blocos já estavam no cofre", res.Chunks-res.NewChunks, res.Chunks)
+		}
+		return ImportResult{Entry: e, Msg: msg}, nil
 	}
 
 	cromName := hash + ".crom"
@@ -314,8 +352,23 @@ func (o AddOptions) PackFlagsList() []string {
 	return f
 }
 
-// VerifyEntry faz unpack em temp e compara SHA-256 com o conteúdo original.
+// usesCrom diz se a importação vai para o formato .crom do crompressor
+// (pedido explícito ou criptografia, que o depósito ainda não tem).
+func (o AddOptions) usesCrom() bool { return o.Legacy || o.Encrypt != "" }
+
+// VerifyEntry relê o conteúdo e compara o SHA-256 com o original.
 func (s *Store) VerifyEntry(e *Entry, pass string) error {
+	if e.IsBlocks() {
+		h, err := store.ParseHash(e.ID)
+		if err != nil {
+			return err
+		}
+		bs, err := s.Blocks()
+		if err != nil {
+			return err
+		}
+		return bs.Verify(h)
+	}
 	tmp, err := os.CreateTemp("", "crom-ar-verify-*")
 	if err != nil {
 		return err
@@ -446,23 +499,31 @@ func (s *Store) Extract(entries []*Entry, opt ExtractOptions) ([]ExtractResult, 
 			results = append(results, res)
 			continue
 		}
-		cb := e.Codebook
-		if cb == "" {
-			cb = s.DefaultBrainPath()
-		}
-		if cb == "" {
-			res.Err = "nenhum codebook disponível para unpack"
-			results = append(results, res)
-			continue
-		}
-		args := []string{"unpack", "-i", s.CromPath(e), "-o", target, "-c", cb}
-		if opt.EncKey != "" {
-			args = append(args, "--encrypt", opt.EncKey)
-		}
-		if _, err := s.Run(args...); err != nil {
-			res.Err = err.Error()
-			results = append(results, res)
-			continue
+		if e.IsBlocks() {
+			if err := s.MaterializeTo(e, target); err != nil {
+				res.Err = err.Error()
+				results = append(results, res)
+				continue
+			}
+		} else {
+			cb := e.Codebook
+			if cb == "" {
+				cb = s.DefaultBrainPath()
+			}
+			if cb == "" {
+				res.Err = "nenhum codebook disponível para unpack"
+				results = append(results, res)
+				continue
+			}
+			args := []string{"unpack", "-i", s.CromPath(e), "-o", target, "-c", cb}
+			if opt.EncKey != "" {
+				args = append(args, "--encrypt", opt.EncKey)
+			}
+			if _, err := s.Run(args...); err != nil {
+				res.Err = err.Error()
+				results = append(results, res)
+				continue
+			}
 		}
 		if h, _, err := SHA256File(target); err != nil || h != e.ID {
 			res.Err = "corrompido ao extrair (hash divergente)"
@@ -510,12 +571,16 @@ func (s *Store) removeLocked(entries []*Entry) (int, error) {
 	removedN := len(s.EntriesSnapshot()) - len(keep)
 	s.setEntries(keep)
 
-	// apaga .crom órfãos
+	// apaga .crom órfãos e conteúdos do depósito sem dono
+	s.releaseBlocks(entries)
 	refs := map[string]int{}
 	for _, e := range s.Man.Entries {
 		refs[e.CromFile]++
 	}
 	for _, e := range entries {
+		if e.IsBlocks() || e.CromFile == "" {
+			continue
+		}
 		if refs[e.CromFile] == 0 {
 			if err := os.Remove(s.CromPath(e)); err == nil {
 				fmt.Printf("🗑  %s liberado do cofre\n", e.CromFile)
@@ -527,14 +592,18 @@ func (s *Store) removeLocked(entries []*Entry) (int, error) {
 
 // Stats resume o cofre.
 type Stats struct {
-	Files       int64   `json:"files"`
-	Unique      int64   `json:"unique_contents"`
-	Original    int64   `json:"original_bytes"`
-	UniqueBytes int64   `json:"unique_bytes"`
-	Stored      int64   `json:"stored_bytes"`
-	DedupSaved  int64   `json:"dedup_saved_bytes"`
-	AvgRatio    float64 `json:"avg_ratio_pct"`
-	VaultOnDisk int64   `json:"vault_on_disk_bytes"`
+	Files        int64   `json:"files"`
+	Unique       int64   `json:"unique_contents"`
+	Original     int64   `json:"original_bytes"`
+	UniqueBytes  int64   `json:"unique_bytes"`
+	Stored       int64   `json:"stored_bytes"`
+	DedupSaved   int64   `json:"dedup_saved_bytes"`
+	AvgRatio     float64 `json:"avg_ratio_pct"`
+	VaultOnDisk  int64   `json:"vault_on_disk_bytes"` // TUDO que o cofre ocupa (vault/, store/, brains/, manifest)
+	CromOnDisk   int64   `json:"crom_on_disk_bytes"`  // vault/ (.crom do crompressor)
+	StoreOnDisk  int64   `json:"store_on_disk_bytes"` // store/ (depósito de blocos)
+	BrainsOnDisk int64   `json:"brains_on_disk_bytes"`
+	SpoolOnDisk  int64   `json:"spool_on_disk_bytes"` // cache de leitura (fora do total)
 }
 
 // ComputeStats calcula estatísticas do cofre.
@@ -552,20 +621,17 @@ func (s *Store) ComputeStats() Stats {
 			st.UniqueBytes += e.Size
 			st.Unique++
 		}
-		if !cromFiles[e.CromFile] {
-			cromFiles[e.CromFile] = true
+		if k := e.ContentKey(); !cromFiles[k] {
+			cromFiles[k] = true
 			st.Stored += e.CromSize
 		}
 	}
 	if s.Cfg != nil && s.Cfg.VaultDir != "" {
-		_ = filepath.WalkDir(s.Cfg.VaultDir, func(p string, d fs.DirEntry, err error) error {
-			if err == nil && d.Type().IsRegular() {
-				if i, err := d.Info(); err == nil {
-					st.VaultOnDisk += i.Size()
-				}
-			}
-			return nil
-		})
+		st.CromOnDisk = dirSize(s.Cfg.VaultDir)
+		st.StoreOnDisk = dirSize(s.StoreDir())
+		st.BrainsOnDisk = dirSize(s.Cfg.BrainsDir)
+		st.SpoolOnDisk = dirSize(filepath.Join(s.Cfg.Root, "spool"))
+		st.VaultOnDisk = st.CromOnDisk + st.StoreOnDisk + st.BrainsOnDisk + dirSize(s.manPath) + dirSize(s.manPath+".bak")
 	}
 	var ratioSum float64
 	var ratioN int

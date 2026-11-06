@@ -29,6 +29,7 @@ import (
 	"github.com/MrJc01/crom-crompressor-ar/internal/bundle"
 	"github.com/MrJc01/crom-crompressor-ar/internal/fusefs"
 	"github.com/MrJc01/crom-crompressor-ar/internal/server"
+	"github.com/MrJc01/crom-crompressor-ar/internal/store"
 	"github.com/MrJc01/crom-crompressor-ar/internal/tray"
 	"github.com/MrJc01/crom-crompressor-ar/internal/vault"
 )
@@ -1024,7 +1025,8 @@ func cmdAdd(args []string) error {
 	brain := fs.String("brain", "", "codebook .cromdb específico (padrão: brains/vault.cromdb)")
 	forceTrain := fs.Bool("train", false, "retreinar codebook do cofre a partir da origem")
 	noVerify := fs.Bool("no-verify", false, "pular verificação lossless pós-pack")
-	noBrain := fs.Bool("no-brain", false, "expert: empacotar sem codebook (não-confiável no V24)")
+	noBrain := fs.Bool("no-brain", false, "expert: empacotar sem codebook")
+	crom := fs.Bool("crom", false, "gravar como .crom do crompressor (formato anterior) em vez do depósito de blocos")
 	pos, err := parseFlex(fs, args)
 	if err != nil {
 		return err
@@ -1036,7 +1038,9 @@ func cmdAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	opt := vault.AddOptions{CDC: *cdc, MultiPass: *multi, Encrypt: *enc, Brain: *brain, NoVerify: *noVerify, ForceTrain: *forceTrain, NoBrain: *noBrain}
+	opt := vault.AddOptions{CDC: *cdc, MultiPass: *multi, Encrypt: *enc, Brain: *brain, NoVerify: *noVerify, ForceTrain: *forceTrain, NoBrain: *noBrain,
+		// --brain/--train só fazem sentido no formato .crom
+		Legacy: *crom || *brain != "" || *forceTrain}
 	for _, p := range pos {
 		res, err := s.Add(p, opt)
 		if err != nil {
@@ -1205,11 +1209,19 @@ func cmdInfo(args []string) error {
 		return fmt.Errorf("nada encontrado para %q", args[0])
 	}
 	e := entries[0]
-	args2 := []string{"info", "-i", s.CromPath(e)}
-	if e.Codebook != "" {
-		args2 = append(args2, "-c", e.Codebook)
+	if !e.IsBlocks() {
+		args2 := []string{"info", "-i", s.CromPath(e)}
+		if e.Codebook != "" {
+			args2 = append(args2, "-c", e.Codebook)
+		}
+		return s.RunPassthrough(args2...)
 	}
-	return s.RunPassthrough(args2...)
+	txt, err := s.InfoText(e)
+	if err != nil {
+		return err
+	}
+	fmt.Print(txt)
+	return nil
 }
 
 func cmdStats(args []string) error {
@@ -1223,10 +1235,17 @@ func cmdStats(args []string) error {
 	fmt.Printf("  conteúdos únicos:   %d\n", st.Unique)
 	fmt.Printf("  origem total:       %s\n", vault.HumanBytes(st.Original))
 	fmt.Printf("  únicos:             %s\n", vault.HumanBytes(st.UniqueBytes))
-	fmt.Printf("  armazenado (.crom): %s\n", vault.HumanBytes(st.Stored))
-	fmt.Printf("  economia dedup:     %s\n", vault.HumanBytes(st.DedupSaved))
-	fmt.Printf("  ratio médio:        %.1f%%\n", st.AvgRatio)
-	fmt.Printf("  disco (vault/):     %s\n", vault.HumanBytes(st.VaultOnDisk))
+	fmt.Printf("  dedup arq. inteiro: %s\n", vault.HumanBytes(st.DedupSaved))
+	fmt.Printf("  DISCO REAL:         %s  (%.1f%% da origem, economia de %s)\n", vault.HumanBytes(st.VaultOnDisk),
+		ratio(st.Original, st.VaultOnDisk), vault.HumanBytes(max(st.Original-st.VaultOnDisk, 0)))
+	fmt.Printf("    depósito blocos:  %s\n", vault.HumanBytes(st.StoreOnDisk))
+	if st.CromOnDisk > 0 || st.BrainsOnDisk > 0 {
+		fmt.Printf("    .crom (vault/):   %s\n", vault.HumanBytes(st.CromOnDisk))
+		fmt.Printf("    codebooks:        %s\n", vault.HumanBytes(st.BrainsOnDisk))
+	}
+	if st.SpoolOnDisk > 0 {
+		fmt.Printf("  cache de leitura:   %s (spool/, fora do total; apagável)\n", vault.HumanBytes(st.SpoolOnDisk))
+	}
 	return nil
 }
 
@@ -1312,6 +1331,9 @@ func cmdMount(args []string) error {
 		return fmt.Errorf("nada encontrado para %q", pos[0])
 	}
 	e := entries[0]
+	if e.IsBlocks() {
+		return fmt.Errorf("%s está no depósito de blocos: monte o cofre inteiro com 'crom-ar fuse' (leitura sob demanda)", e.Name)
+	}
 	cb := e.Codebook
 	if cb == "" {
 		cb = s.DefaultBrainPath()
@@ -1404,16 +1426,49 @@ func cmdDoctor(args []string) error {
 		okf("UIDs únicos")
 	}
 
-	// 4) entradas → .crom existente
+	// 4) entradas → .crom existente / conteúdo no depósito
 	missing := 0
+	var nBlocks int
+	var bs *store.Store
+	if _, err := os.Stat(filepath.Join(root, "store")); err == nil {
+		if bs, err = store.Open(filepath.Join(root, "store"), store.Options{}); err != nil {
+			fail("depósito de blocos não abre: " + err.Error())
+		} else {
+			defer bs.Close()
+		}
+	}
 	for _, e := range man.Entries {
+		if e.IsBlocks() {
+			nBlocks++
+			h, herr := store.ParseHash(e.ID)
+			if bs == nil || herr != nil || !bs.Has(h) {
+				missing++
+				warn("entrada sem conteúdo no depósito: " + e.Name + " (" + e.ID[:12] + ")")
+			}
+			continue
+		}
 		if _, err := os.Stat(filepath.Join(cfg.VaultDir, e.CromFile)); err != nil {
 			missing++
 			warn("entrada sem .crom: " + e.Name + " (" + e.CromFile + ")")
 		}
 	}
 	if missing == 0 {
-		okf("todas as entradas apontam para .crom existentes")
+		okf(fmt.Sprintf("todas as entradas têm conteúdo (%d no depósito de blocos, %d em .crom)", nBlocks, len(man.Entries)-nBlocks))
+	}
+	if bs != nil {
+		if *prune {
+			if gc, err := bs.GC(0.0); err != nil {
+				fail("GC do depósito: " + err.Error())
+			} else {
+				okf(fmt.Sprintf("depósito compactado: %s liberados (%d blocos sem dono)", vault.HumanBytes(max(gc.FreedBytes, 0)), gc.DeadChunks))
+			}
+		} else if n, b, err := bs.Garbage(); err != nil {
+			fail("depósito de blocos: " + err.Error())
+		} else if n > 0 {
+			warn(fmt.Sprintf("%d blocos sem dono no depósito (%s) — rode: crom-ar doctor --prune", n, vault.HumanBytes(b)))
+		} else {
+			okf("depósito de blocos sem blocos órfãos")
+		}
 	}
 
 	// 5) .crom órfãos no disco

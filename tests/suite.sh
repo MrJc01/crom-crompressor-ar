@@ -168,7 +168,7 @@ m=json.load(sys.stdin)
 e=m['entries'][0]
 assert 'hit_rate' in e
 sys.exit(0)" && ok "T7a list --json + hit_rate" || bad "T7a list --json + hit_rate"
-./bin/crom-ar stats 2>/dev/null | grep -q "ratio médio" && ok "T7b stats" || bad "T7b stats"
+./bin/crom-ar stats 2>/dev/null | grep -q "DISCO REAL" && ok "T7b stats" || bad "T7b stats"
 ./bin/crom-ar verify Pk1Renomeado 2>&1 | grep -q "sha256" && ok "T7c verify" || bad "T7c verify"
 vault_before=$(ls "$CROM_AR_ROOT/vault" | wc -l)
 ./bin/crom-ar rm Pk1Renomeado >/dev/null 2>&1
