@@ -129,6 +129,23 @@ func TestDeltaArquivoDeUmBloco(t *testing.T) {
 	if !bytes.Equal(readAll(t, s, rb.Hash), b) {
 		t.Fatal("conteúdo errado")
 	}
+	// receita completa (não a curta): ler o tamanho não pode exigir decodificar
+	s.mu.RLock()
+	l := s.rcp[rb.Hash]
+	s.mu.RUnlock()
+	if l.off < 0 {
+		t.Fatal("bloco único em delta gravado com a receita curta")
+	}
+	// e a compactação do log (GC) não volta para a curta
+	if _, err := s.GC(0); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.RLock()
+	l = s.rcp[rb.Hash]
+	s.mu.RUnlock()
+	if l.off < 0 {
+		t.Fatal("GC trocou a receita completa pela curta")
+	}
 }
 
 func TestDeltaDesligado(t *testing.T) {

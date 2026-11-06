@@ -567,6 +567,7 @@ type Batch struct {
 	mem     map[Hash][]byte // possíveis bases de delta ainda na memória do lote
 	ploc    map[Hash]loc    // possíveis bases já no segmento, fora do índice
 	feats   []byte          // registros de feats.log esperando o Commit
+	pdelta  map[Hash]bool   // blocos do lote guardados como delta
 	recs    []byte          // registros de índice ainda fora do index.log
 	recipes []*Recipe       // receitas esperando o Commit
 	results []*PutResult
@@ -608,7 +609,7 @@ func (s *Store) Begin() (*Batch, error) {
 		s.wmu.Unlock()
 		return nil, err
 	}
-	return &Batch{s: s, lk: lk, w: w, pending: map[Hash]bool{}, mem: map[Hash][]byte{}, ploc: map[Hash]loc{},
+	return &Batch{s: s, lk: lk, w: w, pending: map[Hash]bool{}, mem: map[Hash][]byte{}, ploc: map[Hash]loc{}, pdelta: map[Hash]bool{},
 		frame: make([]byte, 0, s.opt.FrameSize+MaxChunk)}, nil
 }
 
@@ -653,6 +654,7 @@ func (b *Batch) Put(r io.Reader) (*PutResult, error) {
 			f := features(c)
 			if d := b.tryDelta(h, c, f); d != nil {
 				data, pc.n, pc.delta = d, uint32(len(d)), true
+				b.pdelta[h] = true
 				res.DeltaChunks++
 			} else {
 				// bloco guardado inteiro: pode servir de base para os próximos
@@ -678,6 +680,11 @@ func (b *Batch) Put(r io.Reader) (*PutResult, error) {
 	copy(recipe.Hash[:], total.Sum(nil))
 	if z != nil {
 		recipe.Hash, recipe.Size = orig, z.size
+	}
+	if len(recipe.Chunks) == 1 {
+		h := recipe.Chunks[0].Hash
+		l, ok := s.lookup(h)
+		recipe.full = b.pdelta[h] || (ok && l.delta())
 	}
 	res.Hash, res.Size, res.Chunks = recipe.Hash, recipe.Size, len(recipe.Chunks)
 	if s.Has(recipe.Hash) {
@@ -775,6 +782,7 @@ func (b *Batch) Commit() error {
 			delete(b.pending, h)
 		}
 		clear(b.ploc)
+		clear(b.pdelta)
 	}
 	// features depois do índice: uma feature sem bloco é só ignorada
 	if len(b.feats) > 0 {

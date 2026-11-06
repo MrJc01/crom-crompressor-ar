@@ -233,3 +233,14 @@ Encoder com dicionário: criar custa 0,16 ms no nível rápido e 0,8 ms no padr�
 | crom-animate-studio-scratch | 1035.2 MB | **1011.5 MB (−2%)** |
 
 `crom-ar add crom-openllm` num cofre vazio: 520,9 MB em disco, 89,9 s, RAM pico 389 MB (igual a antes do delta).
+
+10 GB de novo com o delta (`SO_COFRE=1 tests/bench_volume.sh`, mesmos 9 projetos): **3250.6 → 3161.2 MB** (3,19×).
+Agora 46 MB **abaixo** do tar+zstd -19 --long único (3207.6 MB) e 144 MB acima de um 7z por projeto (3017.4 MB).
+Por projeto: studio-scratch +979.2 → +956.4 MB, crom-openllm +509.2 → +464.1 MB, crompressor +205.6 → +190.9 MB.
+RAM pico 393–502 MB (antes 389–455; o mapa de features cresce com o cofre).
+
+GC com delta: a primeira versão lia as bases dos deltas em ordem de mapa e decodificava deltas de arquivo de um
+bloco só para saber o tamanho — `crom-ar rm` do studio-scratch levou 152 s. Agora lê em ordem de posição e o arquivo
+de um bloco em delta grava a receita completa: rm 39,8 s e prune 34,5 s nessa rodada (o disco estava lento: o add do
+opencorp levou 221 s contra 42 s na anterior); um prune repetido no mesmo cofre leva 10,7 s (antes do delta, 9,8 s),
+dos quais 3,5 s de CPU são achar as bases. `CROM_AR_CPUPROF=arquivo` grava o perfil de CPU de qualquer comando.

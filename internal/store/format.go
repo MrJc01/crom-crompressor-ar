@@ -115,6 +115,9 @@ type Recipe struct {
 	// nível Level (versão 2 da receita).
 	Xform byte
 	Level byte
+	// full: grava a receita completa mesmo com um bloco só igual ao
+	// conteúdo (bloco em delta: o índice não dá o tamanho original)
+	full bool
 }
 
 const (
@@ -178,5 +181,6 @@ func decodeRecipe(h Hash, b []byte) (*Recipe, error) {
 	if r.Xform == xformNone && total != r.Size {
 		return nil, errors.New("receita: soma dos blocos não bate com o tamanho")
 	}
+	r.full = len(r.Chunks) == 1 && r.Chunks[0].Hash == r.Hash
 	return r, nil
 }

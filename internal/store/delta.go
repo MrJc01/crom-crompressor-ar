@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -116,18 +117,31 @@ func (s *Store) deltaBase(h Hash) (Hash, error) {
 
 // markDeltaBases acrescenta a live as bases de todos os blocos em delta do
 // índice, não só dos vivos: um delta morto pode continuar no índice (frame
-// copiado como está) e a deduplicação o reaproveitaria sem a base.
+// copiado como está) e a deduplicação o reaproveitaria sem a base. Lê os
+// deltas em ordem de posição: cada frame é descomprimido uma vez só (em
+// ordem de mapa, 10 GB levavam 130 s a mais no GC).
 func (s *Store) markDeltaBases(live map[Hash]bool) error {
-	var deltas []Hash
+	type hl struct {
+		h Hash
+		l loc
+	}
+	var deltas []hl
 	s.mu.RLock()
 	for h, l := range s.idx {
 		if l.delta() {
-			deltas = append(deltas, h)
+			deltas = append(deltas, hl{h, l})
 		}
 	}
 	s.mu.RUnlock()
-	for _, h := range deltas {
-		hb, err := s.deltaBase(h)
+	sort.Slice(deltas, func(i, j int) bool {
+		a, b := deltas[i].l, deltas[j].l
+		if a.seg != b.seg {
+			return a.seg < b.seg
+		}
+		return a.frameOff < b.frameOff
+	})
+	for _, d := range deltas {
+		hb, err := s.deltaBase(d.h)
 		if err != nil {
 			return err
 		}

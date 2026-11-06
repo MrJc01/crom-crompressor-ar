@@ -42,7 +42,7 @@ type rloc struct {
 
 // recipeRecord escolhe o registro mais curto para a receita.
 func recipeRecord(r *Recipe) []byte {
-	if len(r.Chunks) == 1 && r.Chunks[0].Hash == r.Hash {
+	if len(r.Chunks) == 1 && r.Chunks[0].Hash == r.Hash && !r.full {
 		return rcpRecord(opOne, r.Hash, nil)
 	}
 	return rcpRecord(opPut, r.Hash, encodeRecipe(r))
