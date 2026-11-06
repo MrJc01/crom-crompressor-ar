@@ -95,7 +95,10 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 48. [ ] Dois projetos com o mesmo caminho relativo colidem na visão normal (pastas de grupo): decidir como mostrar.
 
 **06/11 — análise do crompressor (pedido: "veja tudo que ainda não está considerando")**
-52. [ ] Limpar o `feats.log` no GC (reescrever só com blocos vivos): hoje só cresce e o mapa de features pesa na RAM do `add`.
+52. [x] Limpar o `feats.log` no GC: reescreve só com blocos vivos e inteiros, sem repetidos, quando há ≥ 25% de lixo (sempre no `doctor --prune`). `internal/store/optimize.go`, teste `TestGCCompactaFeats`.
+59. [x] Base órfã ("ocupa os ~16 KB de A só para servir de referência"): todo GC troca a base dos deltas vivos apoiados em bloco que nenhum arquivo usa, por outro bloco vivo parecido, ou guarda o bloco inteiro, quando isso ocupa menos que manter a base. Testes `TestGCTiraBaseOrfa` e `TestGCTrocaBase`. Na linha de comando: v1+v2 (5,7 MB cada, quase iguais) → `rm v1` → depósito 2,45 → 2,30 MB, `verify` ok.
+60. [x] Análise de blocos novos contra deltas que já existem (pedido do usuário): (a) delta novo registra as features apontando para a base, então um bloco parecido com um delta acha a mesma base; (b) o mapa de features passa a preferir o bloco mais novo; (c) `Optimize` (roda no `doctor --prune`) lê uma vez os blocos vivos inteiros sem features (depósito antigo, gravado antes dos deltas) e os transforma em delta quando compensa. Teste `TestOptimizeBlocosAntigos` (disco cai > 30%). Falta: medir no cofre real na migração (item 26).
+61. [ ] Medir no benchmark de 10 GB o custo do GC novo (lê os cabeçalhos de todos os frames e as bases órfãs) e o ganho do `Optimize`.
 53. [ ] **Decidir (usuário):** `.cromar` local. Hoje é cópia gerada na hora (extrai → tar → treina cérebro do próprio pacote → pack → zip), não fica no cofre. O usuário entende que `.cromar` e depósito ficam os dois locais.
 54. [ ] **Decidir (usuário):** sincronização em rede. O `daemon`/`pull` do motor serve arquivos `.crom` soltos de uma pasta e só fala com quem tem o MESMO cérebro (HMAC). O `.cromar` treina um cérebro por pacote → dois pacotes (ou duas versões do mesmo) não sincronizam entre si. Opções: (a) um cérebro fixo por cofre para os `.cromar`; (b) sincronizar depósito ↔ depósito por hash SHA-256 de bloco usando o transporte libp2p do motor (auth, NAT, DHT).
 55. [ ] Reaproveitar do motor: encoder zstd 19 em C (`internal/delta/compress_max_cgo.go`, DataDog/zstd) para os frames frios (item 47); AES-256-GCM (`--encrypt`) para cofre cifrado; versão do motor no `meta.json` do `.cromar` (`.crom` novo não abre em binário velho).
@@ -111,7 +114,7 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 ## ▶️ Retomar
 
 1. Feito até aqui: fases 0, 1 e 2 e a leitura sob demanda (fase 3), na branch `deposito-blocos`.
-2. Próximo: nível mais alto em frames frios (item 47, os 144 MB que faltam para o 7z). Em seguida `tests/suite.sh` num terminal do sistema (FUSE), a migração do cofre real (item 26) e os itens 18 e 9.
+2. Feito em 06/11: limpeza de bases órfãs, feats.log e análise de blocos antigos (itens 52, 59 e 60). Próximo: nível mais alto em frames frios (item 47, os 144 MB que faltam para o 7z). Em seguida `tests/suite.sh` num terminal do sistema (FUSE), a migração do cofre real (item 26) e os itens 18 e 9.
 3. Dados de teste: `tests/bench_real.sh` vai baixá-los. Os desta sessão estavam no scratchpad e não ficam.
 4. FUSE só testa num terminal do sistema, fora do app Claude (`fusermount3: Operation not permitted`).
 6. Conceitos, visão do usuário e decisões abertas: `docs/CONCEITOS.md` (ler antes de mexer em `.cromar`, rede ou cérebro).

@@ -655,6 +655,11 @@ func (b *Batch) Put(r io.Reader) (*PutResult, error) {
 			if d := b.tryDelta(h, c, f); d != nil {
 				data, pc.n, pc.delta = d, uint32(len(d)), true
 				b.pdelta[h] = true
+				// as features do delta apontam para a base: um bloco novo
+				// parecido com este acha a mesma base
+				var hb Hash
+				copy(hb[:], d[:deltaHashLen])
+				b.register(hb, f)
 				res.DeltaChunks++
 			} else {
 				// bloco guardado inteiro: pode servir de base para os próximos

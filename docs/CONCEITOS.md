@@ -98,7 +98,17 @@ gastaria a RAM toda). Então, para cada bloco novo, o depósito:
 
 ### O que ainda falta no depósito
 
-- `feats.log` não é limpo no GC (só cresce, 60 bytes por bloco).
+- ~~`feats.log` não é limpo no GC~~ — feito em 06/11.
+
+### Limpeza: o que sai e o que fica (pergunta do usuário, 06/11)
+
+- Arquivo apagado → a receita sai → o GC apaga todo bloco que nenhuma receita usa.
+- Bloco A sem arquivo mas base de um delta vivo B ("base órfã"): o GC calcula o mais barato entre
+  manter A, guardar B inteiro, ou refazer o delta de B contra outro bloco vivo parecido. Quando
+  muitos deltas dependem de A, manter A costuma ganhar; com um só, A sai.
+- Blocos novos × deltas existentes: as features de um delta apontam para a base dele, então um bloco
+  novo parecido com o delta usa a mesma base. Blocos antigos guardados inteiros (de antes dos deltas)
+  são analisados uma vez no `doctor --prune` e viram delta quando compensa.
 - **Frames frios:** recomprimir em segundo plano, com nível mais forte, os frames que ninguém mexe. O `add`
   continua rápido; o leitor vê o mesmo conteúdo. O motor já tem o encoder zstd 19 em C
   (`internal/delta/compress_max_cgo.go`). LZMA comprime mais, mas lê mais devagar: só para frame frio.

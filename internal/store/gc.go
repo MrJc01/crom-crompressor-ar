@@ -8,11 +8,12 @@ import (
 
 // GCResult descreve uma coleta.
 type GCResult struct {
-	LiveChunks        int   `json:"live_chunks"`
-	DeadChunks        int   `json:"dead_chunks"`
-	SegmentsRewritten int   `json:"segments_rewritten"`
-	SegmentsDeleted   int   `json:"segments_deleted"`
-	FreedBytes        int64 `json:"freed_bytes"`
+	LiveChunks        int            `json:"live_chunks"`
+	DeadChunks        int            `json:"dead_chunks"`
+	SegmentsRewritten int            `json:"segments_rewritten"`
+	SegmentsDeleted   int            `json:"segments_deleted"`
+	FreedBytes        int64          `json:"freed_bytes"`
+	Optimize          OptimizeResult `json:"optimize"`
 }
 
 // GC apaga blocos que nenhuma receita usa. Um segmento cuja fração de bytes
@@ -23,6 +24,20 @@ type GCResult struct {
 // gravados num segmento novo, o índice novo entra por rename atômico, e só
 // então os segmentos antigos são apagados (sobra lixo, nunca falta bloco).
 func (s *Store) GC(minDead float64) (GCResult, error) {
+	var res GCResult
+	// antes: deltas apoiados em base que nenhum arquivo usa trocam de base
+	// (ou voltam a ser inteiros) quando isso ocupa menos
+	opt, err := s.rebaseOrphans()
+	res.Optimize = opt
+	if err != nil {
+		return res, err
+	}
+	r, err := s.gc(minDead)
+	r.Optimize = opt
+	return r, err
+}
+
+func (s *Store) gc(minDead float64) (GCResult, error) {
 	var res GCResult
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
@@ -71,7 +86,18 @@ func (s *Store) GC(minDead float64) (GCResult, error) {
 		off uint64
 	}
 	type fstat struct{ all, live int64 }
+	// o tamanho de cada frame vem do cabeçalho: bytes de um bloco regravado
+	// em outra forma (delta trocado) não estão no índice mas ocupam o frame
 	frames := map[fkey]*fstat{}
+	for _, id := range ids {
+		hs, err := s.segFrames(id)
+		if err != nil {
+			return res, err
+		}
+		for _, h := range hs {
+			frames[fkey{id, h.off}] = &fstat{all: h.raw}
+		}
+	}
 	for h, l := range idx {
 		k := fkey{l.seg, l.frameOff}
 		f := frames[k]
@@ -79,7 +105,6 @@ func (s *Store) GC(minDead float64) (GCResult, error) {
 			f = &fstat{}
 			frames[k] = f
 		}
-		f.all += int64(l.size())
 		if live[h] {
 			f.live += int64(l.size())
 			res.LiveChunks++
@@ -115,9 +140,14 @@ func (s *Store) GC(minDead float64) (GCResult, error) {
 		}
 	}
 	if len(rewrite) == 0 {
-		return res, nil
+		return res, s.compactFeatsLocked(minDead == 0)
 	}
 
+	byFrameAll := map[fkey][]Hash{}
+	for h, l := range idx {
+		k := fkey{l.seg, l.frameOff}
+		byFrameAll[k] = append(byFrameAll[k], h)
+	}
 	newIdx := map[Hash]loc{}
 	var copyFrames []fkey
 	var moving []Hash
@@ -134,7 +164,7 @@ func (s *Store) GC(minDead float64) (GCResult, error) {
 		}
 	}
 	for k, f := range frames {
-		if rewrite[k.seg] && verbatim(f) {
+		if rewrite[k.seg] && verbatim(f) && len(byFrameAll[k]) > 0 {
 			copyFrames = append(copyFrames, k)
 		}
 	}
@@ -264,7 +294,41 @@ func (s *Store) GC(minDead float64) (GCResult, error) {
 	s.idxIno = 0
 	err = s.refreshLocked(true)
 	s.mu.Unlock()
-	return res, err
+	if err != nil {
+		return res, err
+	}
+	return res, s.compactFeatsLocked(minDead == 0)
+}
+
+type segFrame struct {
+	off uint64
+	raw int64
+}
+
+// segFrames lê só os cabeçalhos dos frames de um segmento.
+func (s *Store) segFrames(id uint32) ([]segFrame, error) {
+	f, err := s.segReader(id)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	var out []segFrame
+	hb := make([]byte, frameHdrLen)
+	for off := int64(0); off+frameHdrLen <= st.Size(); {
+		if _, err := f.ReadAt(hb, off); err != nil {
+			break
+		}
+		hd, err := parseFrameHeader(hb)
+		if err != nil {
+			break // cauda de uma queda: o resto é lixo
+		}
+		out = append(out, segFrame{uint64(off), int64(hd.rawLen)})
+		off += frameHdrLen + int64(hd.compLen) + frameTailLen
+	}
+	return out, nil
 }
 
 // Garbage conta, sem mudar nada, os blocos que nenhuma receita usa.

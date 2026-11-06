@@ -168,10 +168,10 @@ func encodeFeat(h Hash, f [3]uint64) []byte {
 func (s *Store) addFeat(h Hash, f [3]uint64) {
 	n := uint32(len(s.featH))
 	s.featH = append(s.featH, h)
+	// o mais novo vence: a versão recente é a mais parecida com a próxima e
+	// a que tem mais chance de continuar viva
 	for _, v := range f {
-		if _, ok := s.featM[v]; !ok {
-			s.featM[v] = n
-		}
+		s.featM[v] = n
 	}
 }
 

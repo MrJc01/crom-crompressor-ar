@@ -1463,10 +1463,19 @@ func cmdDoctor(args []string) error {
 	}
 	if bs != nil {
 		if *prune {
+			// blocos antigos guardados inteiros que podem virar delta de um parecido
+			if o, err := bs.Optimize(); err != nil {
+				fail("análise de blocos parecidos: " + err.Error())
+			} else if o.Scanned > 0 {
+				okf(fmt.Sprintf("%d blocos analisados, %d viraram delta (%s a menos antes da compressão)", o.Scanned, o.NewDeltas, vault.HumanBytes(o.SavedRaw)))
+			}
 			if gc, err := bs.GC(0.0); err != nil {
 				fail("GC do depósito: " + err.Error())
 			} else {
 				okf(fmt.Sprintf("depósito compactado: %s liberados (%d blocos sem dono)", vault.HumanBytes(max(gc.FreedBytes, 0)), gc.DeadChunks))
+				if o := gc.Optimize; o.OrphanBases > 0 {
+					okf(fmt.Sprintf("%d bases sem arquivo dispensadas (%d deltas trocaram de base, %d voltaram inteiros)", o.OrphanBases, o.Rebased, o.Undeltaed))
+				}
 			}
 		} else if n, b, err := bs.Garbage(); err != nil {
 			fail("depósito de blocos: " + err.Error())
