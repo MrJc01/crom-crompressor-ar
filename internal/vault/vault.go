@@ -3,6 +3,7 @@
 package vault
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
@@ -497,45 +498,155 @@ func ReadManifest(path string) (*Manifest, error) { return loadManifest(path) }
 
 var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
 
+// loadManifest lê o manifest em fluxo, uma entrada por vez: com centenas de
+// milhares de entradas, ler o JSON inteiro (dezenas de MB) e só então
+// decodificar dobrava o pico de RAM de qualquer comando.
 func loadManifest(path string) (*Manifest, error) {
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	if bytes.HasPrefix(b, zstdMagic) {
-		d, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
+	defer f.Close()
+	br := bufio.NewReaderSize(f, 1<<16)
+	var r io.Reader = br
+	if head, _ := br.Peek(len(zstdMagic)); bytes.Equal(head, zstdMagic) {
+		d, err := zstd.NewReader(br, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
 		if err != nil {
 			return nil, err
 		}
-		b, err = d.DecodeAll(b, nil)
-		d.Close()
+		defer d.Close()
+		r = d
+	}
+	m, err := decodeManifest(json.NewDecoder(r))
+	if err != nil {
+		return nil, fmt.Errorf("manifest: %w", err)
+	}
+	return m, nil
+}
+
+func decodeManifest(dec *json.Decoder) (*Manifest, error) {
+	m := &Manifest{}
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, fmt.Errorf("esperava objeto (%v)", err)
+	}
+	for dec.More() {
+		t, err := dec.Token()
 		if err != nil {
-			return nil, fmt.Errorf("manifest: %w", err)
+			return nil, err
+		}
+		key, _ := t.(string)
+		switch key {
+		case "version":
+			err = dec.Decode(&m.Version)
+		case "folders":
+			err = dec.Decode(&m.Folders)
+		case "entries":
+			err = decodeEntries(dec, m)
+		default:
+			var skip json.RawMessage
+			err = dec.Decode(&skip)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", key, err)
 		}
 	}
-	m := &Manifest{}
-	if err := json.Unmarshal(b, m); err != nil {
+	if _, err := dec.Token(); err != nil {
 		return nil, err
 	}
 	return m, nil
 }
 
+func decodeEntries(dec *json.Decoder, m *Manifest) error {
+	t, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if t == nil { // "entries": null
+		return nil
+	}
+	if t != json.Delim('[') {
+		return fmt.Errorf("esperava lista")
+	}
+	for dec.More() {
+		e := &Entry{}
+		if err := dec.Decode(e); err != nil {
+			return err
+		}
+		m.Entries = append(m.Entries, e)
+	}
+	_, err = dec.Token()
+	return err
+}
+
+// writeManifest grava em fluxo (uma entrada por vez direto no zstd), sem
+// montar o JSON inteiro na memória, e faz fsync antes do rename.
 func writeManifest(path string, m *Manifest) error {
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	e, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
-	if err != nil {
-		return err
-	}
-	z := e.EncodeAll(b, nil)
-	e.Close()
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, z, 0o644); err != nil {
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	bw := bufio.NewWriterSize(f, 1<<16)
+	z, err := zstd.NewWriter(bw, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1), zstd.WithLowerEncoderMem(true))
+	if err != nil {
+		return fail(err)
+	}
+	if err := encodeManifest(z, m); err != nil {
+		z.Close()
+		return fail(err)
+	}
+	if err := z.Close(); err != nil {
+		return fail(err)
+	}
+	if err := bw.Flush(); err != nil {
+		return fail(err)
+	}
+	if err := f.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func encodeManifest(w io.Writer, m *Manifest) error {
+	folders, err := json.Marshal(m.Folders)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, `{"version":%d,"folders":%s,"entries":`, m.Version, folders); err != nil {
+		return err
+	}
+	if m.Entries == nil {
+		_, err := io.WriteString(w, "null}")
+		return err
+	}
+	if _, err := io.WriteString(w, "["); err != nil {
+		return err
+	}
+	for i, e := range m.Entries {
+		b, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		if i > 0 {
+			if _, err := io.WriteString(w, ","); err != nil {
+				return err
+			}
+		}
+		if _, err := w.Write(b); err != nil {
+			return err
+		}
+	}
+	_, err = io.WriteString(w, "]}")
+	return err
 }
 
 func fileExists(p string) bool {

@@ -87,10 +87,10 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 43. [x] Apagar rápido: `rm` remove as receitas num append só e o GC copia frames quase vivos sem recomprimir. `rm` de um projeto: 43 s → 7,1 s (114 MB de RAM) — commit `4731856`.
 44. [x] Corrida no FUSE entre `Release` e o faxineiro (flags atômicas, `-race` limpo) — commit `4731856`.
 45. [x] Teste de volume com 4,8 GB (7 projetos reais): cofre 2,12× (2258 MB) × zip 1,70× × 7z por projeto 2,38× × tar.zst único 2,23×. Apagar 1,4 GB: 6,6 s (7z: 164 s). Detalhes em `tests/BENCH.md`.
-49. [ ] `extract` de um arquivo de 1 MB levou 8,8 s num cofre de 2,2 GB: abrir não pode depender do tamanho do cofre.
-50. [ ] RAM de pico cresce com o cofre (1,2 GB com 2,2 GB de cofre): resolver com o item 9 (índice fora da RAM) antes do teste de 10 GB.
+49. [x] `extract` de 1 MB em 8,8 s: era disco frio + `ionice -c3` no benchmark; o custo real era decodificar o manifest inteiro (0,42 s com 75 mil entradas). Manifest agora lido e gravado em fluxo (entrada por entrada), com teste de que o formato é o mesmo.
+50. [x] RAM de pico: manifest em fluxo + limite de memória do Go (384 MB, respeita GOMEMLIMIT). extract 157 → 114 MB, add pequeno 586 → 272 MB, add grande 1,2 GB → 557 MB. Sobra fixa: 4 codificadores zstd (~140 MB); o índice em RAM ainda é pequeno nessa escala (item 9 continua para cofres bem maiores).
 46. [ ] Teste de volume com 10 GB (depois do de 5 GB, pedido do usuário).
-47. [ ] Fechar a diferença para o 7z/LZMA: codec mais forte por frame (zstd -19/níveis altos em frames frios, ou xz) e o item 38 (blocos parecidos).
+47. [ ] Fechar a diferença para o 7z/LZMA. Parcial: a amostra de compressibilidade olhava só os primeiros 64 KB do frame; agora olha 4 pontos (crom-animate-agent: 624,8 → 613,1 MB). Medido nos frames comprimíveis (435 MB): zstd-11 127 MB, zstd-19 114 MB, xz -9 102 MB; frames de 1 MiB custam só ~1%. Os frames crus são de fato incompressíveis (zstd-11 ganha 4%). Falta: nível mais alto em frames frios (recompactar em segundo plano) e o item 38.
 48. [ ] Dois projetos com o mesmo caminho relativo colidem na visão normal (pastas de grupo): decidir como mostrar.
 
 **Futuro (só anotado)**
@@ -100,7 +100,7 @@ Plano detalhado: [PLANO.md](PLANO.md). Medições: [DIAGNOSTICO-armazenamento.md
 ## ▶️ Retomar
 
 1. Feito até aqui: fases 0, 1 e 2 e a leitura sob demanda (fase 3), na branch `deposito-blocos`.
-2. Próximo: itens 49 e 50 (abrir rápido, RAM com índice fora da memória), depois o teste de 10 GB (46) e o codec mais forte (47). Em seguida `tests/suite.sh` num terminal do sistema (FUSE), a migração do cofre real (item 26) e os itens 18 e 9.
+2. Próximo: o teste de 10 GB (46), depois o codec mais forte em frames frios (47). Em seguida `tests/suite.sh` num terminal do sistema (FUSE), a migração do cofre real (item 26) e os itens 18 e 9.
 3. Dados de teste: `tests/bench_real.sh` vai baixá-los. Os desta sessão estavam no scratchpad e não ficam.
 4. FUSE só testa num terminal do sistema, fora do app Claude (`fusermount3: Operation not permitted`).
 5. O residente real está montado em `~/CromAr` (cofre em `~/Documentos/CromAr`): testes sempre com `CROM_AR_ROOT` temporário.

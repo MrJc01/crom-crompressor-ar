@@ -125,6 +125,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "comando desconhecido: %s\n\n%s", os.Args[1], usage)
 		os.Exit(1)
 	}
+	writeMemProfile()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "erro: %v\n", err)
 		os.Exit(1)

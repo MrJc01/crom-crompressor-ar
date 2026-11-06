@@ -88,3 +88,17 @@ Para comparar: `7z d` dos .json de dentro do .7z sólido desse projeto (857.0 �
   memória, 1,2 GB com 2,2 GB de cofre) e o `extract` de 1 MB levou 8,8 s.
 - Smoke anterior (2 projetos, 201,8 MB): cofre 104,3 MB (1,94×), zip 1,73×,
   7z por projeto 2,77×; `rm` 43 s → 7,1 s.
+
+## 06/11/2026 — por que não comprime mais (crom-animate-agent, 940 MB, cofre novo)
+
+| | antes | depois (amostra em 4 pontos) |
+|---|---|---|
+| depósito | 624,8 MB | 613,1 MB |
+| frames crus | 462 MiB | 425 MiB |
+| frames zstd | 415 → 129 MiB | 452 → 155 MiB |
+| tempo / RAM do add | 63–86 s / 398 MB | 43 s / 401 MB |
+
+Nos frames comprimíveis (435 MB juntos): zstd-11 127 MB, zstd-19 114 MB, zstd-22 --long 109 MB, xz -9 102 MB.
+Cortar em frames de 1 MiB custa ~1% (127 MB inteiro contra 129 MiB em frames). A diferença para o 7z vem do
+LZMA mais forte nessa parte; o resto (git packs, mp4, jpg, png) já vem comprimido e nenhum compressor ganha
+mais que ~4% nele. O limite em disco é: dedup + o melhor codec sobre o que é único.

@@ -768,13 +768,8 @@ func (s *Store) compressBatch(batch []*frameJob) {
 		go func(j *frameJob) {
 			defer wg.Done()
 			j.codec, j.data = codecRaw, j.raw
-			const probe = 64 << 10
-			if len(j.raw) > 2*probe {
-				// amostra rápida: se nem o nível mais rápido acha nada, nem tenta o caro
-				p := s.fast.EncodeAll(j.raw[:probe], nil)
-				if len(p) > probe*99/100 {
-					return
-				}
+			if !s.worthCompressing(j.raw) {
+				return
 			}
 			z := s.enc.EncodeAll(j.raw, make([]byte, 0, len(j.raw)/2))
 			if len(z) < len(j.raw)*98/100 {
@@ -783,6 +778,28 @@ func (s *Store) compressBatch(batch []*frameJob) {
 		}(j)
 	}
 	wg.Wait()
+}
+
+// worthCompressing amostra 4 pontos do frame (início, 1/3, 2/3, fim) com o
+// nível mais rápido. Um frame junta blocos de vários arquivos: um jpg no
+// começo não quer dizer que o resto (texto, json) não comprima. Só pula o
+// nível caro se nenhuma amostra ganhar nada.
+func (s *Store) worthCompressing(raw []byte) bool {
+	const probe = 32 << 10
+	const spots = 4
+	if len(raw) <= 2*spots*probe {
+		return true
+	}
+	step := (len(raw) - probe) / (spots - 1)
+	var buf []byte
+	for i := 0; i < spots; i++ {
+		at := i * step
+		buf = s.fast.EncodeAll(raw[at:at+probe], buf[:0])
+		if len(buf) < probe*97/100 {
+			return true
+		}
+	}
+	return false
 }
 
 // appendIndex grava no fim do index.log (com flock: o fim é sempre um
