@@ -53,8 +53,12 @@ Motor de compressão: [MrJc01/crompressor](https://github.com/MrJc01/crompressor
      "arquivo .crom coletivo" (estilo WinRAR); criar pasta = criar pacote.
 2. **Tray** (`crom-ar tray`): ícone residente perto do relógio — estado do
    cofre, montar/desmontar, painel web ligável, treinar codebook.
-   Single-instance. `install --autostart` sobe no login (systemd --user).
-   `--web-addr` permite trocar a porta (instâncias de teste).
+   Uma instância só (trava de arquivo em `~/.local/share/crom-ar/tray.pid.lock`,
+   solta sozinha quando o processo morre). `install --autostart` sobe no login
+   (systemd --user). `--web-addr` permite trocar a porta (instâncias de teste).
+   Com o PC parado (depósito sem escrita há 10 min, load baixo, RAM sobrando),
+   recomprime o depósito de blocos no zstd 19 em rodadas curtas e depois faz
+   uma limpeza leve; `--no-compact` desliga.
 3. **Painel web** (`crom-ar gui`): GUI no navegador (127.0.0.1:8619) com
    árvore de pastas, import por upload, extração com verificação, busca
    O(1), relatórios. **Token de 256 bits** (`0600`) + verificação Host/Origin.
@@ -113,7 +117,9 @@ crom-ar verify <nome>           # reconfere SHA-256
 crom-ar info <nome>             # entropia, chunks, HitRate
 crom-ar bench <arquivo|pasta>   # testa 6 estratégias e recomenda a melhor
 crom-ar brain list|add|use|remove|export|train   # codebooks compartilháveis
-crom-ar doctor [--fix] [--prune] # saúde do cofre (manifest, órfãos, brains)
+crom-ar doctor [--fix] [--prune] # saúde do cofre (manifest, órfãos, brains);
+                                 #   --prune também transforma blocos antigos em delta
+crom-ar compactar               # recomprime no zstd 19 os frames já gravados (o residente faz sozinho)
 crom-ar token rotate            # regenera o token da GUI (0600)
 ```
 

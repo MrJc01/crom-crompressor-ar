@@ -109,9 +109,12 @@ gastaria a RAM toda). Então, para cada bloco novo, o depósito:
 - Blocos novos × deltas existentes: as features de um delta apontam para a base dele, então um bloco
   novo parecido com o delta usa a mesma base. Blocos antigos guardados inteiros (de antes dos deltas)
   são analisados uma vez no `doctor --prune` e viram delta quando compensa.
-- **Frames frios:** recomprimir em segundo plano, com nível mais forte, os frames que ninguém mexe. O `add`
-  continua rápido; o leitor vê o mesmo conteúdo. O motor já tem o encoder zstd 19 em C
-  (`internal/delta/compress_max_cgo.go`). LZMA comprime mais, mas lê mais devagar: só para frame frio.
+- **Frames frios (feito em 06/11):** o `add` grava no zstd rápido; depois, `crom-ar compactar` recomprime
+  cada frame fechado no zstd 19 (libzstd em C via cgo). Ler nunca descompacta nada no disco: só na memória,
+  na mesma velocidade. Medido no cofre de teste de 4,8 GB: 1171,6 → 1133,5 MB (−3,3%). O residente faz isso
+  sozinho quando o PC está parado, em rodadas de 64 MB, e para se o PC voltar a trabalhar.
+- **LZMA (só anotado):** comprime mais que o zstd 19, mas lê bem mais devagar. Só valeria para frames quase
+  nunca lidos, com registro de última leitura e volta ao zstd quando o frame voltar a ser lido.
 
 ---
 
