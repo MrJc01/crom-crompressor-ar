@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"path/filepath"
 	"testing"
 )
 
@@ -47,4 +48,21 @@ func TestParseFlexOrdemDeFlags(t *testing.T) {
 			t.Errorf("%s: flag = %q, want %q", c.nome, got, c.flag)
 		}
 	}
+}
+
+func TestTrayLockUmaInstancia(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "tray.lock")
+	rel, ok := trayLock(p)
+	if !ok {
+		t.Fatal("primeira trava falhou")
+	}
+	if _, ok := trayLock(p); ok {
+		t.Fatal("segunda instância pegou a trava")
+	}
+	rel()
+	rel2, ok := trayLock(p)
+	if !ok {
+		t.Fatal("trava não voltou depois de soltar")
+	}
+	rel2()
 }

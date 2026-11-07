@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -552,15 +551,17 @@ func cmdTray(args []string) error {
 		return err
 	}
 
-	// single-instance via pidfile
+	// uma instância só: trava de arquivo (o sistema solta quando o processo
+	// morre; o pidfile sozinho enganava depois de reiniciar, quando o PID
+	// antigo era reaproveitado por outro processo)
 	pidPath := filepath.Join(vault.ExpandHome("~/.local/share/crom-ar"), "tray.pid")
-	if b, err := os.ReadFile(pidPath); err == nil {
-		if alive := signalCheck(strings.TrimSpace(string(b))); alive {
-			fmt.Println("crom-ar tray já está rodando")
-			return nil
-		}
-	}
 	_ = os.MkdirAll(filepath.Dir(pidPath), 0o700)
+	release, ok := trayLock(pidPath + ".lock")
+	if !ok {
+		fmt.Println("crom-ar tray já está rodando")
+		return nil
+	}
+	defer release()
 	_ = os.WriteFile(pidPath, []byte(fmt.Sprint(os.Getpid())), 0o600)
 	defer os.Remove(pidPath)
 
@@ -587,16 +588,17 @@ func cmdTray(args []string) error {
 	})
 }
 
-func signalCheck(pidStr string) bool {
-	pid, err := strconv.Atoi(pidStr)
-	if err != nil || pid <= 0 {
-		return false
-	}
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+// trayLock pega a trava exclusiva do residente; false se outro já tem.
+func trayLock(path string) (func(), bool) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return false
+		return func() {}, true // sem como travar: não impede de abrir
 	}
-	return strings.Contains(string(data), "crom-ar")
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, false
+	}
+	return func() { f.Close() }, true
 }
 
 // cmdFuse monta o cofre como filesystem real (drag & drop nativo).
