@@ -244,3 +244,9 @@ bloco só para saber o tamanho — `crom-ar rm` do studio-scratch levou 152 s. A
 de um bloco em delta grava a receita completa: rm 39,8 s e prune 34,5 s nessa rodada (o disco estava lento: o add do
 opencorp levou 221 s contra 42 s na anterior); um prune repetido no mesmo cofre leva 10,7 s (antes do delta, 9,8 s),
 dos quais 3,5 s de CPU são achar as bases. `CROM_AR_CPUPROF=arquivo` grava o perfil de CPU de qualquer comando.
+
+GC novo (06/11: bases órfãs, feats.log, `Optimize` no prune). `SO_COFRE=1 tests/bench_volume.sh`, 7 projetos padrão,
+4793.5 MB → cofre **2095.7 MB** (2,29×). Apagar o studio-scratch: `rm` 18,8 s (2095.7 → 1159.1 MB), RAM pico 458 MB;
+`doctor --prune` 11,2 s (→ 1139.5 MB, 1557 blocos sem dono a mais, 19,4 MB). Ler o cabeçalho de todos os frames e
+resolver as bases órfãs não pesou: na mesma faixa do rm de 19,7 s / prune de 9,8 s das rodadas anteriores. Como o cofre
+foi gravado já com delta, o `Optimize` não teve bloco antigo para analisar; o ganho dele só aparece no cofre real (item 26).
