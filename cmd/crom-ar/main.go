@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -546,6 +547,7 @@ func cmdTray(args []string) error {
 	noWeb := fs.Bool("no-web", false, "inicia com o painel web desligado")
 	noAuto := fs.Bool("no-automount", false, "não monta o cofre ao iniciar")
 	web := fs.String("web-addr", "", "endereço do painel web (padrão: 127.0.0.1:8619)")
+	noCompact := fs.Bool("no-compact", false, "não recomprime o depósito sozinho quando o PC está parado")
 	if _, err := parseFlex(fs, args); err != nil {
 		return err
 	}
@@ -572,6 +574,9 @@ func cmdTray(args []string) error {
 	}
 	if _, err := server.EnsureToken(); err != nil {
 		return err
+	}
+	if !*noCompact {
+		go s.RunIdleCompact(context.Background(), vault.IdleOptions{})
 	}
 	return tray.Run(s, tray.Options{
 		Mountpoint:  mountpoint,
