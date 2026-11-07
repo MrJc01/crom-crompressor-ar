@@ -301,8 +301,9 @@ func (s *Store) gc(minDead float64) (GCResult, error) {
 }
 
 type segFrame struct {
-	off uint64
-	raw int64
+	off   uint64
+	raw   int64
+	codec byte
 }
 
 // segFrames lê só os cabeçalhos dos frames de um segmento.
@@ -325,7 +326,7 @@ func (s *Store) segFrames(id uint32) ([]segFrame, error) {
 		if err != nil {
 			break // cauda de uma queda: o resto é lixo
 		}
-		out = append(out, segFrame{uint64(off), int64(hd.rawLen)})
+		out = append(out, segFrame{uint64(off), int64(hd.rawLen), hd.codec})
 		off += frameHdrLen + int64(hd.compLen) + frameTailLen
 	}
 	return out, nil

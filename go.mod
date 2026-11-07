@@ -5,7 +5,6 @@ go 1.25.7
 require github.com/hanwen/go-fuse/v2 v2.11.0
 
 require (
-	github.com/DataDog/zstd v1.5.7 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
@@ -22,6 +21,7 @@ require (
 
 require (
 	fyne.io/systray v1.12.2
+	github.com/DataDog/zstd v1.5.7
 	github.com/MrJc01/crompressor v0.0.0-00010101000000-000000000000
 	github.com/klauspost/compress v1.18.0
 	golang.org/x/sys v0.42.0

@@ -422,7 +422,7 @@ func (s *Store) readFrame(seg uint32, off uint64) ([]byte, error) {
 	switch hd.codec {
 	case codecRaw:
 		raw = comp
-	case codecZstd:
+	case codecZstd, codecZstdMax:
 		raw, err = s.dec.DecodeAll(comp, make([]byte, 0, hd.rawLen))
 		if err != nil {
 			return nil, fmt.Errorf("segmento %d @%d: %w", seg, off, err)

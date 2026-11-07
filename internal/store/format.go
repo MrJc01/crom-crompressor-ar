@@ -31,6 +31,8 @@ const (
 
 	codecRaw  = 0
 	codecZstd = 1
+	// zstd já recomprimido no nível máximo (frame frio, ver cold.go)
+	codecZstdMax = 2
 )
 
 var crcTab = crc32.MakeTable(crc32.Castagnoli)

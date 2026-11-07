@@ -60,6 +60,7 @@ Comandos:
   edge pack|unpack              Esqueleto lossy (sem deltas) via cromlib
   bench <arquivo|pasta>         Testa estratégias de compressão e recomenda a melhor
   mount <termo> -m <ponto>      Monta o .crom como filesystem (VFS, exige FUSE)
+  compactar                     Recomprime no zstd 19 o que já foi gravado (frames frios; leitura igual)
   doctor [--fix] [--prune]      Saúde do cofre: manifest, órfãos, brains, spool
   token rotate                  Regenera o token de acesso da GUI (0600)
 
@@ -115,6 +116,8 @@ func main() {
 		err = cmdBench(os.Args[2:])
 	case "doctor":
 		err = cmdDoctor(os.Args[2:])
+	case "compactar", "compact":
+		err = cmdCompactar(os.Args[2:])
 	case "token":
 		err = cmdToken(os.Args[2:])
 	case "mount":
@@ -1589,4 +1592,41 @@ func regenerateToken() (string, error) {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// cmdCompactar recomprime os frames já fechados no zstd 19, em rodadas de
+// 256 MB (o add pode entrar entre elas). Pode ser interrompido e retomado.
+func cmdCompactar(args []string) error {
+	dir := filepath.Join(rootDir(), "store")
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("cofre sem depósito de blocos (%s)", dir)
+	}
+	bs, err := store.Open(dir, store.Options{})
+	if err != nil {
+		return err
+	}
+	defer bs.Close()
+	var antes, depois int64
+	frames := 0
+	for {
+		r, err := bs.Recompress(256 << 20)
+		if err != nil {
+			return err
+		}
+		antes += r.Before
+		depois += r.After
+		frames += r.Frames
+		if r.Segments > 0 {
+			fmt.Printf("  %d frames, %s → %s (faltam %d segmentos)\n", frames, vault.HumanBytes(antes), vault.HumanBytes(depois), r.Remaining)
+		}
+		if r.Remaining == 0 {
+			break
+		}
+	}
+	if frames == 0 {
+		fmt.Println("✔ nada para recomprimir: tudo já está no nível máximo")
+		return nil
+	}
+	fmt.Printf("✔ %d frames recomprimidos: %s a menos\n", frames, vault.HumanBytes(max(antes-depois, 0)))
+	return nil
 }
